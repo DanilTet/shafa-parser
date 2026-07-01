@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+venv/
+env/
+data/
+img/
+img_cropped/
+*.json
+*.txt
+thing-info.txt
+thing-info.json
+.DS_Store
+Thumbs.db
