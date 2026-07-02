@@ -7,6 +7,7 @@ img/
 img_cropped/
 *.json
 *.txt
+!requirements.txt
 thing-info.txt
 thing-info.json
 .DS_Store
