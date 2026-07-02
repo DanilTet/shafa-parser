@@ -21,7 +21,11 @@ class ShafaPoster:
         options.add_argument("--disable-blink-features=AutomationControlled")
         options.add_experimental_option("excludeSwitches", ["enable-logging"])
         
+        # Запуск во весь экран
+        options.add_argument("--start-maximized")
+        
         self.driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+        self.driver.maximize_window()
         self.wait = WebDriverWait(self.driver, 15)
 
     def publish(self, product: Product, image_paths: list):
@@ -42,16 +46,23 @@ class ShafaPoster:
         self._fill_size(product)
         self._fill_color(product)
         
-        # 4. Доп. характеристики (здесь сайт перерисовывает форму)
+        # 4. Доп. характеристики
         self._fill_additional_characteristics(product)
         
-        # 5. ЦЕНА ВВОДИТСЯ В САМОМ КОНЦЕ
+        # 5. КЛЮЧЕВЫЕ СЛОВА
+        self._fill_keywords(product)
+        
+        # 6. ЦЕНА ВВОДИТСЯ В САМОМ КОНЦЕ
         self._fill_price(product)
         
         logger.info("=== ВСЕ ДОСТУПНЫЕ ПОЛЯ ЗАПОЛНЕНЫ ===")
 
+        # 7. ДЕАКТИВАЦИЯ СТАРОГО ОБЪЯВЛЕНИЯ
+        logger.info("Запуск процесса деактивации старого товара...")
+        self.deactivate_original(product.original_url)
+
     def _safe_input(self, element, text):
-        """Универсальная функция ввода, которая не ломает React."""
+        """Универсальная функция ввода, которая использует буфер обмена для защиты от багов React."""
         self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
         time.sleep(0.2)
         try:
@@ -62,7 +73,10 @@ class ShafaPoster:
         element.send_keys(Keys.CONTROL, "a")
         element.send_keys(Keys.BACKSPACE)
         time.sleep(0.2)
-        element.send_keys(str(text))
+        
+        pyperclip.copy(str(text))
+        time.sleep(0.1)
+        element.send_keys(Keys.CONTROL, "v")
         time.sleep(0.5)
 
     def _close_popup(self):
@@ -80,27 +94,34 @@ class ShafaPoster:
     def _upload_photos(self, image_paths: list):
         if not image_paths:
             return
+            
         logger.info("Загрузка фотографий...")
         try:
+            if len(image_paths) > 1:
+                image_paths = [image_paths[-1]] + image_paths[:-1]
+
             upload_input = self.wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'input[type="file"]')))
-            paths_string = "\n".join(image_paths)
-            upload_input.send_keys(paths_string)
-            logger.info("Ожидание 10 секунд для рендера изображений сервером Шафы...")
-            time.sleep(10) 
+            
+            for i, path in enumerate(image_paths, 1):
+                upload_input.send_keys(path)
+                logger.info(f"Фото {i}/{len(image_paths)} отправлено на server.")
+                time.sleep(1.5) 
+                
+            logger.info("Ожидание рендера всех изображений сервером Шафы...")
+            time.sleep(5) 
+            
         except Exception as e:
             logger.error(f"Ошибка при загрузке фото: {e}")
 
     def _fill_basic_text_fields(self, product: Product):
         logger.info("Заполнение названия и описания...")
         try:
-            # Название
             title_field = self.wait.until(EC.visibility_of_element_located((By.XPATH, "//input[@name='titleUk']")))
             self._safe_input(title_field, product.title)
             logger.info("Название вставлено.")
 
             self._close_popup()
 
-            # Описание
             if product.description:
                 desc_field = self.wait.until(EC.visibility_of_element_located((By.TAG_NAME, "textarea")))
                 self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", desc_field)
@@ -164,26 +185,48 @@ class ShafaPoster:
         target_sizes = product.characteristics.get('розмір:', [])
         if not target_sizes:
             return
-        target_size = target_sizes[0]
-        logger.info(f"Поиск размера: {target_size}...")
-        try:
-            tabs_to_check = ["Міжнародний", "Європейський", "🇺🇦 Український", "Виробника"]
-            size_btn_xpath = f"//button[.//p[normalize-space(text())='{target_size}']]"
-            for tab_name in tabs_to_check:
-                try:
-                    tab_btn = self.driver.find_element(By.XPATH, f"//button[contains(., '{tab_name}')]")
-                    self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", tab_btn)
-                    tab_btn.click()
-                    time.sleep(1)
-                    size_btn = self.driver.find_element(By.XPATH, size_btn_xpath)
-                    if size_btn.is_displayed():
-                        size_btn.click()
-                        logger.info(f"Размер '{target_size}' выбран (вкладка '{tab_name}').")
-                        return
-                except:
-                    continue
-        except Exception as e:
-            logger.error(f"Ошибка при выборе размера: {e}")
+            
+        for raw_size in target_sizes:
+            target_size = raw_size
+            
+            # --- БЛОК АДАПТАЦИИ СТАРЫХ РАЗМЕРОВ ---
+            if "/" in raw_size:
+                parts = [p.strip() for p in raw_size.split("/")]
+                for part in parts:
+                    if any(c.isalpha() for c in part):
+                        target_size = part
+                        break
+                else:
+                    target_size = parts[1] if len(parts) >= 3 else parts[0]
+                logger.info(f"Обнаружен старый формат '{raw_size}'. Выделен: '{target_size}'")
+
+            logger.info(f"Поиск размера: {target_size}...")
+            try:
+                tabs_to_check = ["Міжнародний", "Європейський", "🇺🇦 Український", "Виробника"]
+                size_btn_xpath = f"//button[.//p[normalize-space(text())='{target_size}']]"
+                size_found = False
+                
+                for tab_name in tabs_to_check:
+                    try:
+                        tab_btn = self.driver.find_element(By.XPATH, f"//button[contains(., '{tab_name}')]")
+                        self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", tab_btn)
+                        tab_btn.click()
+                        time.sleep(0.5)
+                        
+                        size_btn = self.driver.find_element(By.XPATH, size_btn_xpath)
+                        if size_btn.is_displayed():
+                            # Жёсткий клик через JS, чтобы Selenium не симулировал промах
+                            self.driver.execute_script("arguments[0].click();", size_btn)
+                            logger.info(f"Размер '{target_size}' выбран (вкладка '{tab_name}').")
+                            size_found = True
+                            break 
+                    except:
+                        continue
+                        
+                if not size_found:
+                    logger.warning(f"Размер '{target_size}' не найден ни в одной вкладке.")
+            except Exception as e:
+                logger.error(f"Ошибка при выборе размера '{target_size}': {e}")
 
     def _fill_color(self, product: Product):
         colors = product.characteristics.get('колір:', [])
@@ -204,11 +247,7 @@ class ShafaPoster:
     def _fill_additional_characteristics(self, product: Product):
         logger.info("Заполнение дополнительных характеристик...")
         ignore_keys = ["категорії:", "розмір:", "колір:", "стан"]
-        
-        # СЕТ-ПАМЯТЬ: Сюда записываем то, что уже заполнили
         processed_keys = set() 
-        
-        # Даем ИИ Шафы 3 секунды, чтобы он закончил свою авто-расстановку галочек
         time.sleep(3)
         
         try:
@@ -231,10 +270,9 @@ class ShafaPoster:
                     parent_div = label_el.find_element(By.XPATH, "..")
                     success = False 
                     
-                    # === 1. ОБРАБОТКА КНОПОК (Стиль, Крой, Сезон) ===
+                    # === 1. ОБРАБОТКА КНОПОК ===
                     buttons = parent_div.find_elements(By.XPATH, ".//ul/li/button")
                     if buttons:
-                        # Вычисляем длину базового (невыделенного) класса
                         btn_classes = [b.get_attribute("class") or "" for b in buttons]
                         base_class_len = min([len(c) for c in btn_classes]) if btn_classes else 0
                         
@@ -242,10 +280,8 @@ class ShafaPoster:
                             btn_text = btn.text.strip() or btn.get_attribute("textContent").strip()
                             if btn_text in values_to_select:
                                 btn_class = btn.get_attribute("class") or ""
-                                
-                                # Если класс длиннее базового, значит кнопка уже нажата встроенным ИИ
                                 if len(btn_class) > base_class_len + 2:
-                                    logger.info(f"✅ ИИ Шафы уже выбрал [{clean_key}]: {btn_text}. Пропускаем клик.")
+                                    logger.info(f"✅ ИИ Шафы уже выбрал [{clean_key}]: {btn_text}. Пропускаем.")
                                 else:
                                     self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
                                     time.sleep(0.3)
@@ -253,51 +289,134 @@ class ShafaPoster:
                                     logger.info(f"🔘 Бот выбрал [{clean_key}]: {btn_text}")
                                 success = True
                                 
-                    # === 2. ОБРАБОТКА ПОЛЕЙ ВВОДА (Материал, Принт) ===
+                    # === 2. ОБРАБОТКА ПОЛЕЙ ВВОДА (Материал, Принт и т.д.) ===
                     combobox = parent_div.find_elements(By.XPATH, ".//input[@role='combobox']")
                     if combobox:
-                        # Проверяем, не вписал ли ИИ Шафы уже это значение (ищем текст внутри всего блока)
-                        if values_to_select[0].lower() in parent_div.text.lower():
-                            logger.info(f"✅ ИИ Шафы уже вписал [{clean_key}]: {values_to_select[0]}. Пропускаем ввод.")
-                            success = True
-                        else:
-                            combo_input = combobox[0]
-                            self._safe_input(combo_input, values_to_select[0])
+                        combo_input = combobox[0]
+                        # Цикл по ВСЕМ материалам из списка JSON
+                        for val in values_to_select:
+                            if val.lower() in parent_div.text.lower():
+                                logger.info(f"✅ ИИ Шафы уже вписал [{clean_key}]: {val}. Пропускаем.")
+                                success = True
+                                continue
+                                
+                            try:
+                                combo_input.click()
+                            except:
+                                self.driver.execute_script("arguments[0].click();", combo_input)
+                            
+                            combo_input.send_keys(val)
                             time.sleep(1)
-                            dropdown = self.wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, "div[class*='menu']")))
-                            for option in dropdown.find_elements(By.XPATH, ".//div"):
-                                if option.text.strip().lower() == values_to_select[0].lower():
-                                    self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", option)
-                                    option.click()
-                                    logger.info(f"🔘 Бот вписал [{clean_key}]: {values_to_select[0]}")
-                                    success = True
-                                    break
+                            
+                            try:
+                                dropdown = self.wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, "div[class*='menu']")))
+                                for option in dropdown.find_elements(By.XPATH, ".//div"):
+                                    if option.text.strip().lower() == val.lower():
+                                        self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", option)
+                                        option.click()
+                                        logger.info(f"🔘 Бот вписал [{clean_key}]: {val}")
+                                        success = True
+                                        break
+                            except Exception:
+                                logger.warning(f"Dropdown для '{val}' не появился. Пробуем Enter.")
+                                combo_input.send_keys(Keys.ENTER)
+                                
+                            time.sleep(0.5)
 
                     if success:
                         processed_keys.add(clean_key)
 
-                except Exception as inner_e:
-                    logger.warning(f"Не удалось заполнить {clean_key}. Возможно, элемент перекрыт.")
+                except Exception:
                     continue
         except Exception as e:
             logger.error(f"Ошибка сканирования характеристик: {e}")
 
     def _fill_price(self, product: Product):
-        """Ввод цены в самом конце, чтобы сайт не сбрасывал значение."""
         if not product.price:
             return
-        
         logger.info("Заполнение цены (финальный этап)...")
         try:
             price_field = self.wait.until(EC.visibility_of_element_located((By.XPATH, "//input[@name='price']")))
             self._safe_input(price_field, product.price)
-            
-            # Нажимаем TAB, чтобы снять фокус с поля и зафиксировать цену в React
             price_field.send_keys(Keys.TAB)
             time.sleep(0.5)
-            logger.info("Цена надежно вставлена и зафиксирована.")
+            logger.info("Цена надежно вставлена.")
         except Exception as e:
             logger.error(f"Ошибка при заполнении цены: {e}")
+
+    def _fill_keywords(self, product: Product):
+        logger.info("Генерация и заполнение ключевых слов...")
+        keywords = []
+        first_word = product.title.split()[0] if product.title else ""
+        if first_word: keywords.append(first_word)
+        if product.brand: keywords.append(product.brand)
+        if first_word and product.brand: keywords.append(f"{first_word} {product.brand}")
+        keywords = list(dict.fromkeys(keywords))
+
+        if not keywords: return
+
+        try:
+            # 🟢 ИДЕАЛЬНЫЙ XPATH: Ищем по тексту плейсхолдера, который лежит прямо рядом с input
+            keyword_xpath = "//div[text()='Введіть ключові слова']/following-sibling::div//input"
+            
+            # Срабатывает моментально!
+            keyword_input = self.wait.until(EC.presence_of_element_located((By.XPATH, keyword_xpath)))
+
+            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", keyword_input)
+            time.sleep(0.5)
+
+            for key in keywords:
+                logger.info(f"Ввод ключевого слова: {key}...")
+                try:
+                    keyword_input.click()
+                except:
+                    self.driver.execute_script("arguments[0].click();", keyword_input)
+                
+                keyword_input.send_keys(key)
+                time.sleep(1)
+
+                try:
+                    dropdown = self.wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, "div[class*='menu']")))
+                    options = dropdown.find_elements(By.XPATH, ".//div")
+                    selected = False
+                    for option in options:
+                        if option.text.strip().lower() == key.lower():
+                            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", option)
+                            option.click()
+                            logger.info(f"✅ Выбрано ключевое слово: {option.text.strip()}")
+                            selected = True
+                            break
+                    if not selected:
+                        keyword_input.send_keys(Keys.ENTER)
+                except Exception:
+                    keyword_input.send_keys(Keys.ENTER)
+                time.sleep(0.5)
+        except Exception as e:
+            logger.error(f"Ошибка при заполнении ключевых слов: {e}")
+
+    def deactivate_original(self, original_url: str):
+        if not original_url:
+            logger.warning("Нет ссылки на оригинальный товар. Пропуск деактивации.")
+            return
+
+        logger.info(f"Переход на старое объявление для деактивации: {original_url}")
+        self.driver.execute_script("window.open(arguments[0], '_blank');", original_url)
+        self.driver.switch_to.window(self.driver.window_handles[-1])
+        time.sleep(3)
+
+        try:
+            deactivate_btn = self.wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'Деактивувати')]")))
+            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", deactivate_btn)
+            time.sleep(0.5)
+            self.driver.execute_script("arguments[0].click();", deactivate_btn)
+            logger.info("✅ Оригинальное объявление успешно деактивировано!")
+            time.sleep(2)
+            self.driver.close()
+            self.driver.switch_to.window(self.driver.window_handles[0])
+        except Exception as e:
+            logger.error(f"Не удалось деактивировать товар: {e}")
+            self.driver.close()
+            self.driver.switch_to.window(self.driver.window_handles[0])
 
     def close(self):
         self.driver.quit()

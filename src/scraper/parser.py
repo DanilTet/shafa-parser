@@ -17,11 +17,11 @@ class ShafaParser:
     def __init__(self):
         logger.info("Инициализация браузера Chrome (Selenium)...")
         options = Options()
-        # Отключаем лишний мусорный лог от Chrome в консоли
         options.add_experimental_option("excludeSwitches", ["enable-logging"])
+        options.add_argument("--start-maximized")
         
-        # Используем ChromeDriverManager для гарантированного запуска
         self.driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+        self.driver.maximize_window()
         self.wait = WebDriverWait(self.driver, 10)
         logger.info("Браузер успешно запущен.")
 
@@ -40,6 +40,17 @@ class ShafaParser:
         logger.info(f"Найдено название: '{title}'")
 
         logger.info("Извлечение описания...")
+        try:
+            read_more_xpath = "//button[contains(text(), 'читати далі')]"
+            read_more_btn = self.driver.find_element(By.XPATH, read_more_xpath)
+            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", read_more_btn)
+            time.sleep(0.5)
+            self.driver.execute_script("arguments[0].click();", read_more_btn)
+            logger.info("🔘 Нажата кнопка 'читати далі', текст раскрыт полностью.")
+            time.sleep(1) 
+        except Exception:
+            pass
+
         try:
             description_element = self.wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "p[class='xWgNd3']")))
             description = description_element.text.strip()
@@ -87,7 +98,6 @@ class ShafaParser:
         except Exception:
             logger.warning("Дополнительные характеристики не найдены.")
 
-        # Скачиваем галерею картинок
         downloaded_images = self._download_gallery_images()
 
         logger.info("Сбор данных со страницы успешно завершен!")
@@ -97,6 +107,7 @@ class ShafaParser:
             description=description,
             condition=condition,
             brand=brand,
+            original_url=url,
             characteristics=characteristics,
             downloaded_images=downloaded_images
         )
