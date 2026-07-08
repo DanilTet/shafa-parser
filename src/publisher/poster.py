@@ -301,9 +301,33 @@ class ShafaPoster:
                     combobox = parent_div.find_elements(By.XPATH, ".//input[@role='combobox']")
                     if combobox:
                         combo_input = combobox[0]
+                        
+                        # 2.1 Очистка ошибочных тегов, которые ИИ Шафы мог подставить сам
+                        existing_valid_tags = set()
+                        try:
+                            # Ищем элементы тегов (в них есть <span> с текстом и <div> с <svg> для удаления)
+                            existing_tags = parent_div.find_elements(By.XPATH, ".//div[span and .//*[local-name()='svg']]")
+                            for tag_el in existing_tags:
+                                try:
+                                    tag_text = tag_el.find_element(By.TAG_NAME, "span").text.strip()
+                                    if tag_text:
+                                        # Если этого тега нет в оригинальных характеристиках товара — удаляем
+                                        if not any(tag_text.lower() == v.lower() for v in values_to_select):
+                                            logger.info(f"🗑️ Удаление ошибочного тега от ИИ: '{tag_text}' в поле [{clean_key}]")
+                                            remove_btn = tag_el.find_element(By.XPATH, ".//*[local-name()='svg']/..")
+                                            self.driver.execute_script("arguments[0].click();", remove_btn)
+                                            time.sleep(0.3)
+                                        else:
+                                            existing_valid_tags.add(tag_text.lower())
+                                except Exception:
+                                    pass
+                        except Exception as e:
+                            logger.warning(f"Ошибка при фильтрации тегов ИИ: {e}")
+
+                        # 2.2 Ввод новых тегов
                         # Цикл по ВСЕМ материалам из списка JSON
                         for val in values_to_select:
-                            if val.lower() in parent_div.text.lower():
+                            if val.lower() in existing_valid_tags or val.lower() in parent_div.text.lower():
                                 logger.info(f"✅ ИИ Шафы уже вписал [{clean_key}]: {val}. Пропускаем.")
                                 success = True
                                 continue
