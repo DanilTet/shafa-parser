@@ -28,9 +28,10 @@ class ShafaPoster:
         self.driver.maximize_window()
         self.wait = WebDriverWait(self.driver, 15)
 
-    def publish(self, product: Product, image_paths: list):
-        logger.info("Переход на страницу создания объявления...")
-        self.driver.get("https://shafa.ua/uk/new")
+    def publish(self, product: Product, image_paths: list, deactivate_original: bool = False, auto_publish: bool = False):
+        logger.info("Открытие новой вкладки и переход на страницу создания объявления...")
+        self.driver.execute_script("window.open('https://shafa.ua/uk/new', '_blank');")
+        self.driver.switch_to.window(self.driver.window_handles[-1])
 
         self._upload_photos(image_paths)
         
@@ -58,8 +59,15 @@ class ShafaPoster:
         logger.info("=== ВСЕ ДОСТУПНЫЕ ПОЛЯ ЗАПОЛНЕНЫ ===")
 
         # 7. ДЕАКТИВАЦИЯ СТАРОГО ОБЪЯВЛЕНИЯ
-        logger.info("Запуск процесса деактивации старого товара...")
-        self.deactivate_original(product.original_url)
+        if deactivate_original:
+            logger.info("Запуск процесса деактивации старого товара...")
+            self.deactivate_original(product.original_url)
+
+        # Нажатие на кнопку подтверждения публикации
+        if auto_publish:
+            self.confirm_publish()
+        else:
+            logger.info("Автопубликация отключена. Товар готов к ручной проверке.")
 
     def _safe_input(self, element, text):
         """Универсальная функция ввода, которая использует буфер обмена для защиты от багов React."""
@@ -399,6 +407,7 @@ class ShafaPoster:
             logger.warning("Нет ссылки на оригинальный товар. Пропуск деактивации.")
             return
 
+        current_tab = self.driver.current_window_handle
         logger.info(f"Переход на старое объявление для деактивации: {original_url}")
         self.driver.execute_script("window.open(arguments[0], '_blank');", original_url)
         self.driver.switch_to.window(self.driver.window_handles[-1])
@@ -411,12 +420,26 @@ class ShafaPoster:
             self.driver.execute_script("arguments[0].click();", deactivate_btn)
             logger.info("✅ Оригинальное объявление успешно деактивировано!")
             time.sleep(2)
-            self.driver.close()
-            self.driver.switch_to.window(self.driver.window_handles[0])
         except Exception as e:
             logger.error(f"Не удалось деактивировать товар: {e}")
-            self.driver.close()
-            self.driver.switch_to.window(self.driver.window_handles[0])
+        finally:
+            try:
+                self.driver.close()
+            except:
+                pass
+            self.driver.switch_to.window(current_tab)
+
+    def confirm_publish(self):
+        """Нажатие на кнопку подтверждения публикации."""
+        try:
+            confirm_btn_xpath = "//button[@class='vFhB6y vOHxES aVcdmD' and text()='Додати річ']"
+            confirm_btn = self.wait.until(EC.element_to_be_clickable((By.XPATH, confirm_btn_xpath)))
+            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", confirm_btn)
+            time.sleep(0.5)
+            self.driver.execute_script("arguments[0].click();", confirm_btn)
+            logger.info("Кнопка подтверждения публикации успешно нажата.")
+        except Exception as e:
+            logger.error(f"Не удалось нажать кнопку подтверждения: {e}")
 
     def close(self):
         self.driver.quit()
