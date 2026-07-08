@@ -70,21 +70,21 @@ class ShafaApp(ctk.CTk):
         self.start_button = ctk.CTkButton(
             self.control_frame, text="Запустить конвейер", command=self.start_pipeline,
             fg_color="#2eb82e", hover_color="#208020", text_color="white",
-            disabled_fg_color="#3a3a3a", text_color_disabled="#7a7a7a"
+            text_color_disabled="#7a7a7a"
         )
         self.start_button.pack(side="left", padx=10, pady=10)
 
         self.pause_button = ctk.CTkButton(
             self.control_frame, text="Пауза", command=self.toggle_pause, state="disabled",
             fg_color="#ff9800", hover_color="#e68a00", text_color="white",
-            disabled_fg_color="#3a3a3a", text_color_disabled="#7a7a7a"
+            text_color_disabled="#7a7a7a"
         )
         self.pause_button.pack(side="left", padx=10, pady=10)
 
         self.stop_button = ctk.CTkButton(
             self.control_frame, text="Стоп", command=self.stop_pipeline, state="disabled",
             fg_color="#f44336", hover_color="#d32f2f", text_color="white",
-            disabled_fg_color="#3a3a3a", text_color_disabled="#7a7a7a"
+            text_color_disabled="#7a7a7a"
         )
         self.stop_button.pack(side="left", padx=10, pady=10)
 
