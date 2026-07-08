@@ -67,13 +67,25 @@ class ShafaApp(ctk.CTk):
         self.control_frame = ctk.CTkFrame(self)
         self.control_frame.grid(row=3, column=0, padx=10, pady=5, sticky="ew")
 
-        self.start_button = ctk.CTkButton(self.control_frame, text="Запустить конвейер", command=self.start_pipeline, fg_color="green", hover_color="darkgreen")
+        self.start_button = ctk.CTkButton(
+            self.control_frame, text="Запустить конвейер", command=self.start_pipeline,
+            fg_color="#2eb82e", hover_color="#208020", text_color="white",
+            disabled_fg_color="#3a3a3a", text_color_disabled="#7a7a7a"
+        )
         self.start_button.pack(side="left", padx=10, pady=10)
 
-        self.pause_button = ctk.CTkButton(self.control_frame, text="Пауза", command=self.toggle_pause, state="disabled", fg_color="orange", hover_color="darkorange")
+        self.pause_button = ctk.CTkButton(
+            self.control_frame, text="Пауза", command=self.toggle_pause, state="disabled",
+            fg_color="#ff9800", hover_color="#e68a00", text_color="white",
+            disabled_fg_color="#3a3a3a", text_color_disabled="#7a7a7a"
+        )
         self.pause_button.pack(side="left", padx=10, pady=10)
 
-        self.stop_button = ctk.CTkButton(self.control_frame, text="Стоп", command=self.stop_pipeline, state="disabled", fg_color="red", hover_color="darkred")
+        self.stop_button = ctk.CTkButton(
+            self.control_frame, text="Стоп", command=self.stop_pipeline, state="disabled",
+            fg_color="#f44336", hover_color="#d32f2f", text_color="white",
+            disabled_fg_color="#3a3a3a", text_color_disabled="#7a7a7a"
+        )
         self.stop_button.pack(side="left", padx=10, pady=10)
 
         # Статистика и Прогресс Бар
@@ -195,11 +207,11 @@ class ShafaApp(ctk.CTk):
         
         if self.pause_event.is_set():
             self.pause_event.clear()
-            self.pause_button.configure(text="Продолжить", fg_color="blue", hover_color="darkblue")
+            self.pause_button.configure(text="Продолжить", fg_color="#2196f3", hover_color="#1976d2")
             logger.info("⏸️ Конвейер поставлен на паузу. Бот остановится перед следующим шагом.")
         else:
             self.pause_event.set()
-            self.pause_button.configure(text="Пауза", fg_color="orange", hover_color="darkorange")
+            self.pause_button.configure(text="Пауза", fg_color="#ff9800", hover_color="#e68a00")
             logger.info("▶️ Конвейер возобновлен.")
 
     def stop_pipeline(self):
@@ -298,7 +310,7 @@ class ShafaApp(ctk.CTk):
             # Возвращаем кнопки в исходное состояние
             def reset_buttons():
                 self.start_button.configure(state="normal")
-                self.pause_button.configure(state="disabled", text="Пауза", fg_color="orange", hover_color="darkorange")
+                self.pause_button.configure(state="disabled", text="Пауза", fg_color="#ff9800", hover_color="#e68a00")
                 self.stop_button.configure(state="disabled")
             self.after(0, reset_buttons)
 
