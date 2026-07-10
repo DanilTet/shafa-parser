@@ -17,3 +17,6 @@ CROPPED_FOLDER = os.path.join(BASE_DIR, "data", "img_cropped")
 
 # Профиль Chrome теперь будет храниться внутри проекта: parser-shafa/data/chrome_profile
 CHROME_PROFILE_PATH = os.path.join(BASE_DIR, "data", "chrome_profile")
+
+# Локальная база объявлений профиля
+MY_LISTINGS_PATH = os.path.join(BASE_DIR, "data", "my_listings.json")
