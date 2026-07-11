@@ -44,31 +44,17 @@ class ShafaApp(ctk.CTk):
         self.is_running = False
         self.should_stop = False
 
-        # Селектор режима
-        self.mode_var = ctk.StringVar(value="Поштучно")
-        self.mode_selector = ctk.CTkSegmentedButton(
-            self, values=["Поштучно", "Копирование профиля"],
-            variable=self.mode_var,
-            command=self.change_mode
-        )
-        self.mode_selector.grid(row=0, column=0, padx=10, pady=(10, 5), sticky="ew")
-
         # Контейнер для ввода
         self.input_frame = ctk.CTkFrame(self)
         self.input_frame.grid(row=1, column=0, padx=10, pady=(0, 10), sticky="nsew")
         self.input_frame.grid_columnconfigure(0, weight=1)
         self.input_frame.grid_rowconfigure(1, weight=1)
 
-        # Режим: Поштучно
+        # Список ссылок
         self.url_label = ctk.CTkLabel(self.input_frame, text="Список ссылок (каждая с новой строки):")
+        self.url_label.grid(row=0, column=0, padx=10, pady=(5, 0), sticky="w")
         self.url_textbox = ctk.CTkTextbox(self.input_frame, height=120)
-
-        # Режим: Копирование профиля
-        self.profile_label = ctk.CTkLabel(self.input_frame, text="Ссылка на профиль продавца (например, https://shafa.ua/member/username):")
-        self.profile_entry = ctk.CTkEntry(self.input_frame, placeholder_text="https://shafa.ua/member/username")
-
-        # Инициализация видимости элементов ввода
-        self.change_mode("Поштучно")
+        self.url_textbox.grid(row=1, column=0, padx=10, pady=(0, 5), sticky="nsew")
         
         # Настройки
         self.settings_frame = ctk.CTkFrame(self)
@@ -168,19 +154,7 @@ class ShafaApp(ctk.CTk):
         if total > 0:
             self.progress_bar.set(processed / total)
 
-    def change_mode(self, mode):
-        if mode == "Поштучно":
-            self.profile_label.grid_forget()
-            self.profile_entry.grid_forget()
-            
-            self.url_label.grid(row=0, column=0, padx=10, pady=(5, 0), sticky="w")
-            self.url_textbox.grid(row=1, column=0, padx=10, pady=(0, 5), sticky="nsew")
-        else:
-            self.url_label.grid_forget()
-            self.url_textbox.grid_forget()
-            
-            self.profile_label.grid(row=0, column=0, padx=10, pady=(5, 0), sticky="w")
-            self.profile_entry.grid(row=1, column=0, padx=10, pady=(0, 5), sticky="ew")
+
 
     def load_local_db_info(self):
         if os.path.exists(MY_LISTINGS_PATH):
@@ -305,51 +279,26 @@ class ShafaApp(ctk.CTk):
             self.stop_button.configure(state="disabled")
 
     def start_pipeline(self):
-        mode = self.mode_var.get()
-        deactivate_flag = self.deactivate_var.get()
-        autopublish_flag = self.autopublish_var.get()
-        skip_duplicates_flag = self.skip_duplicates_var.get()
-
-        if mode == "Поштучно":
-            urls_text = self.url_textbox.get("1.0", "end").strip()
-            if not urls_text:
-                logger.error("Список ссылок пуст!")
-                return
-                
-            urls = [u.strip() for u in urls_text.split('\n') if u.strip().startswith('http')]
-            if not urls:
-                logger.error("Не найдено корректных ссылок.")
-                return
-
-            self.update_stats_display(0, len(urls), 0, 0, 0)
-            self.is_running = True
-            self.should_stop = False
-            self.start_button.configure(state="disabled")
-            self.stop_button.configure(state="normal")
-            self.sync_button.configure(state="disabled")
+        urls_text = self.url_textbox.get("1.0", "end").strip()
+        if not urls_text:
+            logger.error("Список ссылок пуст!")
+            return
             
-            logger.info(f"Запуск конвейера для {len(urls)} товаров...")
-            thread = threading.Thread(target=self.run_pipeline, args=(urls,), daemon=True)
-            thread.start()
-        else:
-            profile_url = self.profile_entry.get().strip()
-            if not profile_url or not profile_url.startswith("http"):
-                logger.error("Введите корректную ссылку на профиль продавца!")
-                return
-                
-            self.is_running = True
-            self.should_stop = False
-            self.start_button.configure(state="disabled")
-            self.stop_button.configure(state="normal")
-            self.sync_button.configure(state="disabled")
-            
-            logger.info(f"Запуск копирования профиля: {profile_url}...")
-            thread = threading.Thread(
-                target=self.run_profile_copy_pipeline, 
-                args=(profile_url, deactivate_flag, autopublish_flag, skip_duplicates_flag), 
-                daemon=True
-            )
-            thread.start()
+        urls = [u.strip() for u in urls_text.split('\n') if u.strip().startswith('http')]
+        if not urls:
+            logger.error("Не найдено корректных ссылок.")
+            return
+
+        self.update_stats_display(0, len(urls), 0, 0, 0)
+        self.is_running = True
+        self.should_stop = False
+        self.start_button.configure(state="disabled")
+        self.stop_button.configure(state="normal")
+        self.sync_button.configure(state="disabled")
+        
+        logger.info(f"Запуск конвейера для {len(urls)} товаров...")
+        thread = threading.Thread(target=self.run_pipeline, args=(urls,), daemon=True)
+        thread.start()
 
     def run_pipeline(self, urls):
         logger.info("=== ЗАПУСК ПОТОКА АВТОМАТИЗАЦИИ ===")
@@ -431,155 +380,6 @@ class ShafaApp(ctk.CTk):
         except Exception as e:
             logger.error(f"Критическая ошибка конвейера: {e}", exc_info=True)
         finally:
-            self.is_running = False
-            self.after(0, lambda: self.start_button.configure(state="normal"))
-            self.after(0, lambda: self.stop_button.configure(state="disabled"))
-            self.after(0, lambda: self.sync_button.configure(state="normal"))
-
-    def run_profile_copy_pipeline(self, profile_url, deactivate_flag, autopublish_flag, skip_duplicates_flag):
-        logger.info("=== ЗАПУСК ПОТОКА КОПИРОВАНИЯ ПРОФИЛЯ ===")
-        prepare_image_folder(SAVE_FOLDER)
-        
-        poster = None
-        parser = None
-        try:
-            own_titles = set()
-            if skip_duplicates_flag:
-                if os.path.exists(MY_LISTINGS_PATH):
-                    try:
-                        with open(MY_LISTINGS_PATH, "r", encoding="utf-8") as f:
-                            own_titles = set(json.load(f))
-                        logger.info(f"Загружено {len(own_titles)} объявлений из локальной базы.")
-                    except Exception as e:
-                        logger.error(f"Не удалось загрузить локальную базу: {e}. Проверка дубликатов отключена.")
-            
-            poster = ShafaPoster()
-            
-            logger.info(f"Открытие целевого профиля: {profile_url}...")
-            poster.driver.get(profile_url)
-            time.sleep(4)
-            
-            processed_hrefs = set()
-            success = 0
-            failed = 0
-            total_time = 0
-            processed = 0
-            
-            consecutive_same_count = 0
-            last_total_hrefs = 0
-            
-            self.after(0, lambda: self.update_stats_display(0, 0, 0, 0, 0))
-            
-            while not self.should_stop:
-                # Находим ссылки на товары на текущем экране
-                links = poster.driver.find_elements(By.TAG_NAME, "a")
-                found_new = False
-                
-                for a in links:
-                    if self.should_stop:
-                        break
-                        
-                    try:
-                        href = a.get_attribute("href")
-                        text = a.text.strip()
-                    except Exception:
-                        continue
-                        
-                    if href and re.search(r'/\d+-[^/]+$', href) and not any(p in href for p in ["/member/", "/my/", "/dynamic-collections/"]):
-                        if href not in processed_hrefs:
-                            processed_hrefs.add(href)
-                            found_new = True
-                            
-                            if skip_duplicates_flag and text.lower() in own_titles:
-                                logger.info(f"⏩ Пропуск (дубликат по имени в списке): {text}")
-                                processed += 1
-                                self.after(0, lambda p=processed, s=success, f=failed, a=0: self.update_stats_display(processed, processed, s, f, a))
-                                continue
-                                
-                            logger.info(f"\n--- КОПИРОВАНИЕ ТОВАРА: {href} ---")
-                            start_time = time.perf_counter()
-                            
-                            parser = ShafaParser()
-                            product_data = None
-                            try:
-                                product_data = parser.parse_item(href)
-                                save_product_to_txt(product_data, INFO_TXT_PATH)
-                                save_product_to_json(product_data, INFO_JSON_PATH)
-                            except Exception as e:
-                                logger.error(f"Ошибка парсинга товара {href}: {e}", exc_info=True)
-                                failed += 1
-                                processed += 1
-                                avg_time = round(total_time / success, 2) if success > 0 else 0
-                                self.after(0, lambda p=processed, s=success, f=failed, a=avg_time: self.update_stats_display(processed, processed, s, f, a))
-                                continue
-                            finally:
-                                parser.close()
-                                
-                            if skip_duplicates_flag and product_data.title.lower() in own_titles:
-                                logger.info(f"⏩ Пропуск после парсинга (точный дубликат по названию): {product_data.title}")
-                                success += 1
-                                processed += 1
-                                avg_time = round(total_time / success, 2) if success > 0 else 0
-                                self.after(0, lambda p=processed, s=success, f=failed, a=avg_time: self.update_stats_display(processed, processed, s, f, a))
-                                continue
-                                
-                            try:
-                                processed_images = prepare_images_for_upload(product_data.downloaded_images, CROPPED_FOLDER)
-                                poster.publish(product_data, processed_images, deactivate_flag, autopublish_flag)
-                                
-                                time_spent = round(time.perf_counter() - start_time, 2)
-                                total_time += time_spent
-                                success += 1
-                                processed += 1
-                                
-                                own_titles.add(product_data.title.lower())
-                                try:
-                                    with open(MY_LISTINGS_PATH, "w", encoding="utf-8") as f:
-                                        json.dump(list(own_titles), f, ensure_ascii=False, indent=4)
-                                    self.after(0, self.load_local_db_info)
-                                except:
-                                    pass
-                                    
-                                logger.info(f"Товар успешно скопирован за {time_spent} сек.")
-                                avg_time = round(total_time / success, 2) if success > 0 else 0
-                                self.after(0, lambda p=processed, s=success, f=failed, a=avg_time: self.update_stats_display(processed, processed, s, f, a))
-                                
-                            except Exception as e:
-                                logger.error(f"Ошибка публикации товара {href}: {e}", exc_info=True)
-                                failed += 1
-                                processed += 1
-                                avg_time = round(total_time / success, 2) if success > 0 else 0
-                                self.after(0, lambda p=processed, s=success, f=failed, a=avg_time: self.update_stats_display(processed, processed, s, f, a))
-                            
-                            break
-                
-                if not found_new and not self.should_stop:
-                    logger.info("Прокрутка страницы для подгрузки новых товаров...")
-                    poster.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                    time.sleep(3)
-                    
-                    current_total_hrefs = len(processed_hrefs)
-                    if current_total_hrefs == last_total_hrefs:
-                        consecutive_same_count += 1
-                        if consecutive_same_count >= 3:
-                            logger.info("Все доступные товары целевого профиля обработаны.")
-                            break
-                    else:
-                        consecutive_same_count = 0
-                        last_total_hrefs = current_total_hrefs
-
-            if self.should_stop:
-                logger.info("Копирование профиля остановлено пользователем.")
-                
-            logger.info("\n=== КОНВЕЙЕР УСПЕШНО ЗАВЕРШЕН ===")
-            
-        except Exception as e:
-            logger.error(f"Критическая ошибка при копировании профиля: {e}", exc_info=True)
-        finally:
-            if poster and not self.should_stop:
-                poster.close()
-            elif poster and self.should_stop:
-                logger.info("Браузер оставлен открытым по запросу пользователя.")
             self.is_running = False
             self.after(0, lambda: self.start_button.configure(state="normal"))
             self.after(0, lambda: self.stop_button.configure(state="disabled"))
