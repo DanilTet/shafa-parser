@@ -77,13 +77,20 @@ class ShafaApp(ctk.CTk):
         self.autopublish_desc = ctk.CTkLabel(self.settings_frame, text="ВКЛ: сразу публикует на сайт. ВЫКЛ: сохраняет как Черновик", text_color="gray", font=("Arial", 10))
         self.autopublish_desc.grid(row=1, column=1, padx=10, pady=(0, 6), sticky="w")
 
-        # Чекбокс 2-го монитора
+        # Чекбокс 2-го монитора и Скрытого режима
         self.secondary_monitor_var = ctk.BooleanVar(value=True)
-        self.secondary_monitor_checkbox = ctk.CTkCheckBox(self.settings_frame, text="Запускать браузер на 2-м мониторе", variable=self.secondary_monitor_var)
+        self.secondary_monitor_checkbox = ctk.CTkCheckBox(self.settings_frame, text="Запускать на 2-м мониторе", variable=self.secondary_monitor_var)
         self.secondary_monitor_checkbox.grid(row=2, column=0, padx=10, pady=(4, 2), sticky="w")
 
-        self.secondary_monitor_desc = ctk.CTkLabel(self.settings_frame, text="Автоматически перемещает Chrome на второй экран (если подключен)", text_color="gray", font=("Arial", 10))
+        self.hidden_mode_var = ctk.BooleanVar(value=False)
+        self.hidden_mode_checkbox = ctk.CTkCheckBox(self.settings_frame, text="Скрытый режим (показ в конце)", variable=self.hidden_mode_var)
+        self.hidden_mode_checkbox.grid(row=2, column=1, padx=10, pady=(4, 2), sticky="w")
+
+        self.secondary_monitor_desc = ctk.CTkLabel(self.settings_frame, text="Перемещает Chrome на второй экран (если подключен)", text_color="gray", font=("Arial", 10))
         self.secondary_monitor_desc.grid(row=3, column=0, padx=10, pady=(0, 10), sticky="w")
+
+        self.hidden_mode_desc = ctk.CTkLabel(self.settings_frame, text="Работает без окна и разворачивает браузер в финале", text_color="gray", font=("Arial", 10))
+        self.hidden_mode_desc.grid(row=3, column=1, padx=10, pady=(0, 10), sticky="w")
 
         # Панель управления конвейером
         self.control_frame = ctk.CTkFrame(self)
@@ -242,6 +249,7 @@ class ShafaApp(ctk.CTk):
         deactivate_flag = self.deactivate_var.get()
         autopublish_flag = self.autopublish_var.get()
         use_secondary_flag = self.secondary_monitor_var.get()
+        hidden_flag = self.hidden_mode_var.get()
         
         total = len(urls)
         processed = 0
@@ -252,13 +260,16 @@ class ShafaApp(ctk.CTk):
         poster = None
         parser = None
         try:
-            poster = ShafaPoster(use_secondary_monitor=use_secondary_flag)
+            poster = ShafaPoster(use_secondary_monitor=use_secondary_flag, hidden_mode=hidden_flag)
             parser = ShafaParser()
 
             # --- ПРОВЕРКА АВТОРИЗАЦИИ (LOGIN GUARD) ---
             logger.info("Проверка статуса авторизации перед началом работы...")
             if not poster.is_authorized():
                 logger.warning("Сессия отсутствует или истекла. Запуск интерактивной авторизации...")
+                # Если режим скрытый, временно покажем окно для ввода логина
+                if hidden_flag:
+                    poster.reveal_window(use_secondary_monitor=use_secondary_flag)
                 user_agreed = self.request_login_dialog()
                 if not user_agreed:
                     logger.info("Конвейер остановлен пользователем во время авторизации.")
@@ -311,6 +322,10 @@ class ShafaApp(ctk.CTk):
                     self.after(0, lambda p=processed, s=success, f=failed, a=avg_time: self.update_stats_display(p, total, s, f, a))
 
             logger.info("\n=== КОНВЕЙЕР УСПЕШНО ЗАВЕРШЕН ===")
+
+            # Если работал скрытый режим и автопубликация выключена — раскрываем браузер для проверки
+            if poster and hidden_flag and not autopublish_flag:
+                poster.reveal_window(use_secondary_monitor=use_secondary_flag)
             
         except Exception as e:
             logger.error(f"Критическая ошибка конвейера: {e}", exc_info=True)

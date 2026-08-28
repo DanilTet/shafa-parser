@@ -14,7 +14,9 @@ from src.utils.logger import logger
 from src.utils.display_utils import get_secondary_monitor
 
 class ShafaPoster:
-    def __init__(self, use_secondary_monitor: bool = True):
+    def __init__(self, use_secondary_monitor: bool = True, hidden_mode: bool = False):
+        self.hidden_mode = hidden_mode
+        self.use_secondary_monitor = use_secondary_monitor
         logger.info("Запуск браузера для публикации...")
         options = Options()
         options.add_argument(f"--user-data-dir={CHROME_PROFILE_PATH}")
@@ -22,25 +24,64 @@ class ShafaPoster:
         options.add_experimental_option("excludeSwitches", ["enable-logging"])
         
         target_monitor = None
-        if use_secondary_monitor:
+        if hidden_mode:
+            logger.info("🫥 Скрытый режим: браузер запущен в фоне (без отображения на экране).")
+            options.add_argument("--window-position=-10000,-10000")
+            options.add_argument("--window-size=1280,900")
+        elif use_secondary_monitor:
             target_monitor = get_secondary_monitor()
             if target_monitor:
                 logger.info(f"🖥️ Обнаружен второй монитор (x={target_monitor['x']}, y={target_monitor['y']}). Открываем браузер на дополнительном экране!")
                 options.add_argument(f"--window-position={target_monitor['x']},{target_monitor['y']}")
                 options.add_argument(f"--window-size={target_monitor['width']},{target_monitor['height']}")
-        
-        # Запуск во весь экран
-        options.add_argument("--start-maximized")
+                options.add_argument("--start-maximized")
+            else:
+                options.add_argument("--start-maximized")
+        else:
+            options.add_argument("--start-maximized")
         
         self.driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-        if target_monitor:
+        if hidden_mode:
             try:
-                self.driver.set_window_position(target_monitor['x'], target_monitor['y'])
+                self.driver.set_window_position(-10000, -10000)
             except Exception:
                 pass
-        self.driver.maximize_window()
+        elif target_monitor:
+            try:
+                self.driver.set_window_position(target_monitor['x'], target_monitor['y'])
+                self.driver.maximize_window()
+            except Exception:
+                pass
+        else:
+            self.driver.maximize_window()
+
         self.wait = WebDriverWait(self.driver, 15)
         self._initial_tab_consumed = False
+
+    def reveal_window(self, use_secondary_monitor: bool = True):
+        """Мгновенно перемещает и разворачивает скрытый браузер на целевой монитор."""
+        logger.info("🪄 Раскрытие окна браузера на экране для проверки объявлений...")
+        try:
+            target_monitor = None
+            if use_secondary_monitor:
+                target_monitor = get_secondary_monitor()
+
+            if target_monitor:
+                self.driver.set_window_position(target_monitor['x'], target_monitor['y'])
+            else:
+                self.driver.set_window_position(0, 0)
+                
+            self.driver.maximize_window()
+            
+            try:
+                import winsound
+                winsound.MessageBeep(winsound.MB_ICONASTERISK)
+            except Exception:
+                pass
+                
+            logger.info("✅ Браузер успешно отображен на экране!")
+        except Exception as e:
+            logger.error(f"Не удалось развернуть окно браузера: {e}")
 
     def is_authorized(self) -> bool:
         """Проверяет, авторизован ли пользователь на Shafa.ua."""
