@@ -342,46 +342,97 @@ class ShafaPoster:
             return
             
         for raw_size in target_sizes:
-            target_size = raw_size
+            raw_clean = str(raw_size).strip()
+            # Кандидаты для поиска (например: '110', '110 см', '110-116')
+            candidates = [raw_clean]
             
-            # --- БЛОК АДАПТАЦИИ СТАРЫХ РАЗМЕРОВ ---
-            if "/" in raw_size:
-                parts = [p.strip() for p in raw_size.split("/")]
-                for part in parts:
-                    if any(c.isalpha() for c in part):
-                        target_size = part
-                        break
-                else:
-                    target_size = parts[1] if len(parts) >= 3 else parts[0]
-                logger.info(f"Обнаружен старый формат '{raw_size}'. Выделен: '{target_size}'")
+            # Убираем 'см' если есть
+            if "см" in raw_clean.lower():
+                without_cm = re.sub(r'(?i)\s*см', '', raw_clean).strip()
+                if without_cm and without_cm not in candidates:
+                    candidates.append(without_cm)
 
-            logger.info(f"Поиск размера: {target_size}...")
+            # --- БЛОК АДАПТАЦИИ СТАРЫХ РАЗМЕРОВ (L / 40 / 48) ---
+            if "/" in raw_clean:
+                parts = [p.strip() for p in raw_clean.split("/")]
+                for part in parts:
+                    if part not in candidates:
+                        candidates.append(part)
+                # Буквенные размеры ставим в приоритет
+                alpha_parts = [p for p in parts if any(c.isalpha() for c in p)]
+                if alpha_parts:
+                    candidates = alpha_parts + [c for c in candidates if c not in alpha_parts]
+                logger.info(f"Обнаружен составной формат размера '{raw_clean}'. Кандидаты: {candidates}")
+
+            logger.info(f"Поиск размера (кандидаты: {candidates})...")
             try:
-                tabs_to_check = ["Міжнародний", "Європейський", "🇺🇦 Український", "Виробника"]
-                size_btn_xpath = f"//button[.//p[normalize-space(text())='{target_size}']]"
+                # Приоритетные вкладки (для детской одежды 'За зростом' в самом начале!)
+                tabs_to_check = [
+                    "За зростом",
+                    "Міжнародний",
+                    "Європейський",
+                    "Український",
+                    "За віком",
+                    "Довжина устілки",
+                    "Виробника"
+                ]
+                
                 size_found = False
                 
-                for tab_name in tabs_to_check:
+                # 1. Сначала пробуем найти размер в текущей активной вкладке без переключения
+                for candidate in candidates:
                     try:
-                        tab_btn = self.driver.find_element(By.XPATH, f"//button[contains(., '{tab_name}')]")
-                        self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", tab_btn)
-                        tab_btn.click()
-                        time.sleep(0.5)
-                        
-                        size_btn = self.driver.find_element(By.XPATH, size_btn_xpath)
-                        if size_btn.is_displayed():
-                            # Жёсткий клик через JS, чтобы Selenium не симулировал промах
-                            self.driver.execute_script("arguments[0].click();", size_btn)
-                            logger.info(f"Размер '{target_size}' выбран (вкладка '{tab_name}').")
-                            size_found = True
-                            break 
-                    except:
-                        continue
-                        
+                        xpath = f"//button[.//p[normalize-space(text())='{candidate}'] or normalize-space(text())='{candidate}']"
+                        btns = self.driver.find_elements(By.XPATH, xpath)
+                        for btn in btns:
+                            if btn.is_displayed():
+                                self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
+                                time.sleep(0.3)
+                                self.driver.execute_script("arguments[0].click();", btn)
+                                logger.info(f"✅ Размер '{candidate}' успешно выбран в текущей вкладке.")
+                                size_found = True
+                                break
+                    except Exception:
+                        pass
+                    if size_found:
+                        break
+
+                # 2. Если не найден в текущей — перебираем вкладки размеров
                 if not size_found:
-                    logger.warning(f"Размер '{target_size}' не найден ни в одной вкладке.")
+                    for tab_name in tabs_to_check:
+                        try:
+                            # Ищем кнопку переключения вкладки
+                            tab_btns = self.driver.find_elements(By.XPATH, f"//button[contains(., '{tab_name}')]")
+                            for tab_btn in tab_btns:
+                                if tab_btn.is_displayed():
+                                    self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", tab_btn)
+                                    self.driver.execute_script("arguments[0].click();", tab_btn)
+                                    time.sleep(0.4)
+                                    break
+                            
+                            # Проверяем кандидатов в открывшейся вкладке
+                            for candidate in candidates:
+                                xpath = f"//button[.//p[normalize-space(text())='{candidate}'] or normalize-space(text())='{candidate}']"
+                                size_btns = self.driver.find_elements(By.XPATH, xpath)
+                                for size_btn in size_btns:
+                                    if size_btn.is_displayed():
+                                        self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", size_btn)
+                                        time.sleep(0.2)
+                                        self.driver.execute_script("arguments[0].click();", size_btn)
+                                        logger.info(f"✅ Размер '{candidate}' успешно выбран (вкладка '{tab_name}').")
+                                        size_found = True
+                                        break
+                                if size_found:
+                                    break
+                        except Exception:
+                            continue
+                        if size_found:
+                            break
+
+                if not size_found:
+                    logger.warning(f"⚠️ Размер '{raw_clean}' не найден ни в одной вкладке размеров.")
             except Exception as e:
-                logger.error(f"Ошибка при выборе размера '{target_size}': {e}")
+                logger.error(f"Ошибка при выборе размера '{raw_clean}': {e}")
 
     def _fill_color(self, product: Product):
         colors = product.characteristics.get('колір:', [])
