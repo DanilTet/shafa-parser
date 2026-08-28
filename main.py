@@ -14,6 +14,7 @@ from src.scraper.parser import ShafaParser
 from src.scraper.profile_scanner import ProfileScanner
 from src.sync.profile_store import ProfileStore
 from src.publisher.poster import ShafaPoster
+from src.utils.display_utils import prevent_sleep, allow_sleep
 from src.utils.logger import logger
 
 class TextboxHandler(logging.Handler):
@@ -325,6 +326,7 @@ class ShafaApp(ctk.CTk):
 
     def _run_profile_scan_thread(self, raw_input: str):
         poster = None
+        prevent_sleep()
         try:
             username = ProfileScanner.extract_username(raw_input)
             logger.info(f"Запуск сканирования профиля '{username}'...")
@@ -356,6 +358,7 @@ class ShafaApp(ctk.CTk):
         finally:
             if poster:
                 poster.close()
+            allow_sleep()
             self.is_running = False
             self.after(0, lambda: self.sync_scan_button.configure(state="normal"))
 
@@ -447,6 +450,7 @@ class ShafaApp(ctk.CTk):
 
     def _run_migration_thread(self, username, batch_limit, deactivate_flag, autopublish_flag, use_secondary_flag, hidden_flag):
         logger.info(f"=== ЗАПУСК МИГРАЦИИ ПРОФИЛЯ '{username}' ===")
+        prevent_sleep()
         prepare_image_folder(SAVE_FOLDER)
 
         pending_items = self.profile_store.get_items_by_status(username, status="pending", limit=batch_limit)
@@ -515,6 +519,7 @@ class ShafaApp(ctk.CTk):
         finally:
             if parser:
                 parser.close()
+            allow_sleep()
             self.is_running = False
             self.after(0, lambda: self.sync_start_button.configure(state="normal"))
             self.after(0, lambda: self.sync_stop_button.configure(state="disabled", text="Закончить выставляние"))
@@ -611,6 +616,7 @@ class ShafaApp(ctk.CTk):
 
     def run_pipeline(self, urls):
         logger.info("=== ЗАПУСК ПОТОКА АВТОМАТИЗАЦИИ ===")
+        prevent_sleep()
         prepare_image_folder(SAVE_FOLDER)
         
         deactivate_flag = self.deactivate_var.get()
@@ -690,6 +696,7 @@ class ShafaApp(ctk.CTk):
         finally:
             if parser:
                 parser.close()
+            allow_sleep()
             self.is_running = False
             self.after(0, lambda: self.start_button.configure(state="normal"))
             self.after(0, lambda: self.stop_button.configure(state="disabled", text="Закончить выставляние"))

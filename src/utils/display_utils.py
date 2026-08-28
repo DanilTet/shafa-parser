@@ -1,5 +1,32 @@
 import ctypes
 from ctypes import wintypes
+from src.utils.logger import logger
+
+# Windows API константы энергосбережения
+ES_CONTINUOUS = 0x80000000
+ES_SYSTEM_REQUIRED = 0x00000001
+ES_AWAYMODE_REQUIRED = 0x00000040
+
+def prevent_sleep():
+    """
+    Запрещает Windows уходить в спящий режим во время работы конвейера.
+    При этом экран может гаснуть по таймеру для экономии энергии.
+    """
+    try:
+        ctypes.windll.kernel32.SetThreadExecutionState(
+            ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED
+        )
+        logger.info("🛡️ Авто-защита от сна активирована: ноутбук не уснет во время работы.")
+    except Exception as e:
+        logger.warning(f"Не удалось активировать защиту от сна: {e}")
+
+def allow_sleep():
+    """Восстанавливает стандартный режим энергосбережения Windows."""
+    try:
+        ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
+        logger.info("🛡️ Защита от сна снята: стандартный режим энергосбережения восстановлен.")
+    except Exception:
+        pass
 
 class RECT(ctypes.Structure):
     _fields_ = [
