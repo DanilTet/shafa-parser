@@ -1,5 +1,4 @@
 import time
-import pyperclip
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -117,22 +116,29 @@ class ShafaPoster:
             logger.info("Автопубликация отключена. Товар готов к ручной проверке.")
 
     def _safe_input(self, element, text):
-        """Универсальная функция ввода, которая использует буфер обмена для защиты от багов React."""
-        self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
-        time.sleep(0.2)
+        """Универсальный и надежный ввод текста напрямую в React-компонент без использования буфера обмена ОС."""
         try:
-            element.click()
-        except:
-            self.driver.execute_script("arguments[0].click();", element)
-        time.sleep(0.2)
-        element.send_keys(Keys.CONTROL, "a")
-        element.send_keys(Keys.BACKSPACE)
-        time.sleep(0.2)
-        
-        pyperclip.copy(str(text))
-        time.sleep(0.1)
-        element.send_keys(Keys.CONTROL, "v")
-        time.sleep(0.5)
+            js_script = """
+            const el = arguments[0];
+            const val = arguments[1];
+            el.scrollIntoView({block: 'center'});
+            
+            const isTextarea = el.tagName.toLowerCase() === 'textarea';
+            const proto = isTextarea ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+            const nativeSetter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+            
+            nativeSetter.call(el, val);
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            """
+            self.driver.execute_script(js_script, element, str(text))
+            time.sleep(0.3)
+        except Exception:
+            try:
+                element.clear()
+                element.send_keys(str(text))
+            except Exception:
+                pass
 
     def _close_popup(self):
         """Жесткое закрытие ИИ-всплывашки Шафы."""
@@ -176,13 +182,8 @@ class ShafaPoster:
 
             if product.description:
                 desc_field = self.wait.until(EC.visibility_of_element_located((By.TAG_NAME, "textarea")))
-                self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", desc_field)
-                pyperclip.copy(product.description)
-                time.sleep(0.2)
-                desc_field.click()
-                desc_field.send_keys(Keys.CONTROL, 'v')
-                time.sleep(0.5)
-                logger.info("Описание вставлено через буфер обмена.")
+                self._safe_input(desc_field, product.description)
+                logger.info("Описание вставлено.")
 
         except Exception as e:
             logger.error(f"Ошибка при заполнении базовых полей: {e}")
