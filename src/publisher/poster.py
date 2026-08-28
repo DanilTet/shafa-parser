@@ -145,9 +145,6 @@ class ShafaPoster:
             
         logger.info("Загрузка фотографий...")
         try:
-            if len(image_paths) > 1:
-                image_paths = [image_paths[-1]] + image_paths[:-1]
-
             upload_input = self.wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'input[type="file"]')))
             
             for i, path in enumerate(image_paths, 1):
@@ -186,18 +183,33 @@ class ShafaPoster:
     def _fill_category(self, product: Product):
         target_categories = product.characteristics.get('категорії:', [])
         if not target_categories:
+            logger.warning("Категории не указаны в характеристиках товара.")
             return
-        target_category = target_categories[0]
-        logger.info(f"Ожидание рекомендаций для категории: {target_category}...")
-        try:
-            time.sleep(2)
-            category_btn_xpath = f"//button[contains(., '{target_category}')]"
-            category_btn = self.wait.until(EC.visibility_of_element_located((By.XPATH, category_btn_xpath)))
-            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", category_btn)
-            category_btn.click()
-            logger.info(f"Категория '{target_category}' успешно выбрана.")
-        except:
-            logger.warning(f"Категория '{target_category}' не найдена. Оберіть вручну.")
+
+        logger.info(f"Выбор категории из списка: {target_categories}...")
+        time.sleep(2)  # Даем Shafa время подгрузить блок рекомендаций
+
+        for cat_name in target_categories:
+            try:
+                # Ищем кнопку категории среди рекомендаций и по общему списку
+                xpath_candidates = [
+                    f"//button[.//p[normalize-space(text())='{cat_name}'] or .//span[normalize-space(text())='{cat_name}'] or normalize-space(text())='{cat_name}']",
+                    f"//button[contains(., '{cat_name}')]",
+                ]
+                for xpath in xpath_candidates:
+                    buttons = self.driver.find_elements(By.XPATH, xpath)
+                    for btn in buttons:
+                        if btn.is_displayed():
+                            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
+                            time.sleep(0.3)
+                            self.driver.execute_script("arguments[0].click();", btn)
+                            logger.info(f"✅ Категория '{cat_name}' успешно выбрана!")
+                            time.sleep(1.5)  # Ожидание рендера зависимых разделов (размеры, цвета, свойства)
+                            return
+            except Exception as e:
+                logger.warning(f"Попытка выбора категории '{cat_name}' не удалась: {e}")
+
+        logger.warning(f"Категория из списка {target_categories} не найдена автоматически. Оберіть вручну.")
 
     def _fill_condition(self, product: Product):
         if not product.condition:

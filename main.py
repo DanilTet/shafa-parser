@@ -241,8 +241,10 @@ class ShafaApp(ctk.CTk):
         total_time = 0
         
         poster = None
+        parser = None
         try:
             poster = ShafaPoster()
+            parser = ShafaParser()
 
             # --- ПРОВЕРКА АВТОРИЗАЦИИ (LOGIN GUARD) ---
             logger.info("Проверка статуса авторизации перед началом работы...")
@@ -266,21 +268,18 @@ class ShafaApp(ctk.CTk):
                 logger.info(f"\n--- ОБРАБОТКА ТОВАРА: {url} ---")
                 start_time = time.perf_counter()
                 
-                parser = ShafaParser()
                 product_data = None
                 try:
-                    product_data = parser.parse_item(url)
+                    product_data = parser.parse_item(url, fallback_driver=poster.driver)
                     save_product_to_txt(product_data, INFO_TXT_PATH)
                     save_product_to_json(product_data, INFO_JSON_PATH)
                 except Exception as e:
-                    logger.error(f"Ошибка парсинга товара {url}: {e}", exc_info=True)
+                    logger.error(f"Ошибка сбора данных товара {url}: {e}", exc_info=True)
                     failed += 1
                     processed += 1
                     avg_time = round(total_time / processed, 2) if processed > 0 else 0
                     self.after(0, lambda p=processed, s=success, f=failed, a=avg_time: self.update_stats_display(p, total, s, f, a))
                     continue
-                finally:
-                    parser.close()
 
                 try:
                     processed_images = prepare_images_for_upload(product_data.downloaded_images, CROPPED_FOLDER)
@@ -307,6 +306,8 @@ class ShafaApp(ctk.CTk):
         except Exception as e:
             logger.error(f"Критическая ошибка конвейера: {e}", exc_info=True)
         finally:
+            if parser:
+                parser.close()
             self.is_running = False
             self.after(0, lambda: self.start_button.configure(state="normal"))
             self.after(0, lambda: self.stop_button.configure(state="disabled"))
