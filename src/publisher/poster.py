@@ -28,6 +28,46 @@ class ShafaPoster:
         self.driver.maximize_window()
         self.wait = WebDriverWait(self.driver, 15)
 
+    def is_authorized(self) -> bool:
+        """Проверяет, авторизован ли пользователь на Shafa.ua."""
+        try:
+            logger.info("Проверка статуса авторизации на Shafa.ua...")
+            self.driver.get("https://shafa.ua/uk/new")
+            time.sleep(2)
+            current_url = self.driver.current_url.lower()
+
+            # Если произошел редирект на страницу входа
+            if "login" in current_url or "signup" in current_url or "auth" in current_url:
+                logger.warning("Сессия отсутствует или истекла (редирект на страницу входа).")
+                return False
+
+            # Проверяем, есть ли на странице элементы формы создания объявления или профиля
+            form_elements = self.driver.find_elements(
+                By.XPATH,
+                "//input[@name='titleUk'] | //input[@type='file'] | //a[contains(@href, '/member/')] | //a[contains(@href, '/my/')]"
+            )
+            if form_elements:
+                logger.info("✅ Авторизация подтверждена!")
+                return True
+
+            # Дополнительная проверка на наличие кнопки входа
+            login_buttons = self.driver.find_elements(
+                By.XPATH,
+                "//a[contains(@href, '/login')] | //button[contains(., 'Увійти')] | //button[contains(., 'Вхід')]"
+            )
+            if login_buttons:
+                logger.warning("Найдена кнопка входа: пользователь не авторизован.")
+                return False
+
+            if "/new" in current_url:
+                logger.info("✅ Авторизация подтверждена!")
+                return True
+
+            return False
+        except Exception as e:
+            logger.error(f"Ошибка при проверке авторизации: {e}")
+            return False
+
     def publish(self, product: Product, image_paths: list, deactivate_original: bool = False, auto_publish: bool = False):
         logger.info("Открытие новой вкладки и переход на страницу создания объявления...")
         self.driver.execute_script("window.open('https://shafa.ua/uk/new', '_blank');")
