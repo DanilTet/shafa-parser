@@ -70,12 +70,20 @@ class ShafaApp(ctk.CTk):
         self.autopublish_checkbox = ctk.CTkCheckBox(self.settings_frame, text="Опубликовывать автоматически", variable=self.autopublish_var)
         self.autopublish_checkbox.grid(row=0, column=1, padx=10, pady=(10, 2), sticky="w")
         
-        # Описания для Чекбоксов
+        # Описания для Чекбоксов 1
         self.deactivate_desc = ctk.CTkLabel(self.settings_frame, text="Скрывает исходный товар после успешного копирования", text_color="gray", font=("Arial", 10))
-        self.deactivate_desc.grid(row=1, column=0, padx=10, pady=(0, 10), sticky="w")
+        self.deactivate_desc.grid(row=1, column=0, padx=10, pady=(0, 6), sticky="w")
         
         self.autopublish_desc = ctk.CTkLabel(self.settings_frame, text="ВКЛ: сразу публикует на сайт. ВЫКЛ: сохраняет как Черновик", text_color="gray", font=("Arial", 10))
-        self.autopublish_desc.grid(row=1, column=1, padx=10, pady=(0, 10), sticky="w")
+        self.autopublish_desc.grid(row=1, column=1, padx=10, pady=(0, 6), sticky="w")
+
+        # Чекбокс 2-го монитора
+        self.secondary_monitor_var = ctk.BooleanVar(value=True)
+        self.secondary_monitor_checkbox = ctk.CTkCheckBox(self.settings_frame, text="Запускать браузер на 2-м мониторе", variable=self.secondary_monitor_var)
+        self.secondary_monitor_checkbox.grid(row=2, column=0, padx=10, pady=(4, 2), sticky="w")
+
+        self.secondary_monitor_desc = ctk.CTkLabel(self.settings_frame, text="Автоматически перемещает Chrome на второй экран (если подключен)", text_color="gray", font=("Arial", 10))
+        self.secondary_monitor_desc.grid(row=3, column=0, padx=10, pady=(0, 10), sticky="w")
 
         # Панель управления конвейером
         self.control_frame = ctk.CTkFrame(self)
@@ -233,6 +241,7 @@ class ShafaApp(ctk.CTk):
         
         deactivate_flag = self.deactivate_var.get()
         autopublish_flag = self.autopublish_var.get()
+        use_secondary_flag = self.secondary_monitor_var.get()
         
         total = len(urls)
         processed = 0
@@ -243,7 +252,7 @@ class ShafaApp(ctk.CTk):
         poster = None
         parser = None
         try:
-            poster = ShafaPoster()
+            poster = ShafaPoster(use_secondary_monitor=use_secondary_flag)
             parser = ShafaParser()
 
             # --- ПРОВЕРКА АВТОРИЗАЦИИ (LOGIN GUARD) ---

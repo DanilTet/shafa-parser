@@ -19,13 +19,15 @@ def prepare_images_for_upload(input_paths: list, output_folder: str) -> list:
         try:
             filename = os.path.basename(path)
             img = Image.open(path)
+            if img.mode != "RGB":
+                img = img.convert("RGB")
             width, height = img.size
             
             # Отрезаем 10 пикселей снизу
             cropped = img.crop((0, 0, width, height - 10))
             
             save_path = os.path.join(output_folder, filename)
-            cropped.save(save_path, "JPEG", quality=95)
+            cropped.save(save_path, "JPEG", quality=95, progressive=False)
             processed_paths.append(save_path)
             
         except Exception as e:

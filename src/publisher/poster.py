@@ -11,19 +11,33 @@ from selenium.webdriver.common.keys import Keys
 from src.models import Product
 from src.config import CHROME_PROFILE_PATH
 from src.utils.logger import logger
+from src.utils.display_utils import get_secondary_monitor
 
 class ShafaPoster:
-    def __init__(self):
+    def __init__(self, use_secondary_monitor: bool = True):
         logger.info("Запуск браузера для публикации...")
         options = Options()
         options.add_argument(f"--user-data-dir={CHROME_PROFILE_PATH}")
         options.add_argument("--disable-blink-features=AutomationControlled")
         options.add_experimental_option("excludeSwitches", ["enable-logging"])
         
+        target_monitor = None
+        if use_secondary_monitor:
+            target_monitor = get_secondary_monitor()
+            if target_monitor:
+                logger.info(f"🖥️ Обнаружен второй монитор (x={target_monitor['x']}, y={target_monitor['y']}). Открываем браузер на дополнительном экране!")
+                options.add_argument(f"--window-position={target_monitor['x']},{target_monitor['y']}")
+                options.add_argument(f"--window-size={target_monitor['width']},{target_monitor['height']}")
+        
         # Запуск во весь экран
         options.add_argument("--start-maximized")
         
         self.driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+        if target_monitor:
+            try:
+                self.driver.set_window_position(target_monitor['x'], target_monitor['y'])
+            except Exception:
+                pass
         self.driver.maximize_window()
         self.wait = WebDriverWait(self.driver, 15)
         self._initial_tab_consumed = False
@@ -152,21 +166,53 @@ class ShafaPoster:
         except:
             pass
 
+    def _wait_for_photos_uploaded(self, expected_count: int, timeout: int = 45):
+        """Динамически ожидает полной загрузки и рендера всех фото сервером Шафы."""
+        logger.info(f"Ожидание полной обработки всех {expected_count} фото сервером Шафы...")
+        start_time = time.time()
+        
+        js_check = """
+        const spinners = document.querySelectorAll(
+            "[class*='spinner'], [class*='loading'], [class*='loader'], [class*='progress'], [role='progressbar']"
+        );
+        const visibleSpinners = Array.from(spinners).filter(s => s.offsetParent !== null);
+        
+        return {
+            has_spinners: visibleSpinners.length > 0
+        };
+        """
+        
+        time.sleep(3)
+        while time.time() - start_time < timeout:
+            try:
+                res = self.driver.execute_script(js_check)
+                has_spinners = res.get("has_spinners", False) if isinstance(res, dict) else False
+                
+                if not has_spinners and (time.time() - start_time >= 4):
+                    logger.info("✅ Все фотографии успешно загружены и обработаны сервером!")
+                    time.sleep(1.5)
+                    return True
+            except Exception:
+                pass
+            time.sleep(1)
+            
+        logger.warning("Таймаут ожидания рендера фото. Продолжаем заполнение...")
+        return False
+
     def _upload_photos(self, image_paths: list):
         if not image_paths:
             return
             
-        logger.info("Загрузка фотографий...")
+        logger.info(f"Загрузка {len(image_paths)} фотографий...")
         try:
             upload_input = self.wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'input[type="file"]')))
             
             for i, path in enumerate(image_paths, 1):
                 upload_input.send_keys(path)
-                logger.info(f"Фото {i}/{len(image_paths)} отправлено на server.")
-                time.sleep(1.5) 
+                logger.info(f"Фото {i}/{len(image_paths)} отправлено.")
+                time.sleep(1.2)
                 
-            logger.info("Ожидание рендера всех изображений сервером Шафы...")
-            time.sleep(5) 
+            self._wait_for_photos_uploaded(len(image_paths))
             
         except Exception as e:
             logger.error(f"Ошибка при загрузке фото: {e}")
@@ -516,6 +562,8 @@ class ShafaPoster:
     def confirm_publish(self):
         """Нажатие на кнопку подтверждения публикации."""
         try:
+            logger.info("Подготовка к публикации и стабилизация формы...")
+            time.sleep(1.5)  # Буфер для полной фиксации всех медиаданных в React state
             confirm_btn_xpath = "//button[@class='vFhB6y vOHxES aVcdmD' and text()='Додати річ']"
             confirm_btn = self.wait.until(EC.element_to_be_clickable((By.XPATH, confirm_btn_xpath)))
             self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", confirm_btn)
