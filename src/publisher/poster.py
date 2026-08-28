@@ -27,6 +27,7 @@ class ShafaPoster:
         self.driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
         self.driver.maximize_window()
         self.wait = WebDriverWait(self.driver, 15)
+        self._initial_tab_consumed = False
 
     def is_authorized(self) -> bool:
         """Проверяет, авторизован ли пользователь на Shafa.ua."""
@@ -69,9 +70,15 @@ class ShafaPoster:
             return False
 
     def publish(self, product: Product, image_paths: list, deactivate_original: bool = False, auto_publish: bool = False):
-        logger.info("Открытие новой вкладки и переход на страницу создания объявления...")
-        self.driver.execute_script("window.open('https://shafa.ua/uk/new', '_blank');")
-        self.driver.switch_to.window(self.driver.window_handles[-1])
+        if not self._initial_tab_consumed:
+            logger.info("Использование текущей вкладки для создания объявления...")
+            if "/new" not in self.driver.current_url.lower():
+                self.driver.get("https://shafa.ua/uk/new")
+            self._initial_tab_consumed = True
+        else:
+            logger.info("Открытие новой вкладки для создания следующего объявления...")
+            self.driver.execute_script("window.open('https://shafa.ua/uk/new', '_blank');")
+            self.driver.switch_to.window(self.driver.window_handles[-1])
 
         self._upload_photos(image_paths)
         
