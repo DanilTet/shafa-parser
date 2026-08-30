@@ -341,7 +341,7 @@ class ShafaPoster:
         if not target_sizes:
             return
 
-        # 1. Формируем список кандидатов для каждого запрошенного размера
+        # 1. Формируем список кандидатов для каждого запрошенного размера (с учетом регистров)
         parsed_size_candidates = []
         has_range = False
         has_alpha = False
@@ -349,23 +349,32 @@ class ShafaPoster:
 
         for raw_size in target_sizes:
             raw_clean = str(raw_size).strip()
-            candidates = [raw_clean]
+            candidates = []
+
+            # Добавляем базовые формы и регистры (например: 95f, 95F, 100D, 100d)
+            for s in [raw_clean, raw_clean.upper(), raw_clean.lower()]:
+                if s and s not in candidates:
+                    candidates.append(s)
 
             # Убираем 'см' (например: 110 см -> 110)
             if "см" in raw_clean.lower():
                 without_cm = re.sub(r'(?i)\s*см', '', raw_clean).strip()
-                if without_cm and without_cm not in candidates:
-                    candidates.append(without_cm)
+                if without_cm:
+                    for s in [without_cm, without_cm.upper(), without_cm.lower()]:
+                        if s and s not in candidates:
+                            candidates.append(s)
 
             # Составной формат со слэшами (L / 40 / 48)
             if "/" in raw_clean:
                 parts = [p.strip() for p in raw_clean.split("/")]
                 for p in parts:
-                    if p not in candidates:
-                        candidates.append(p)
+                    for s in [p, p.upper(), p.lower()]:
+                        if s and s not in candidates:
+                            candidates.append(s)
                 alpha_parts = [p for p in parts if any(c.isalpha() for c in p)]
                 if alpha_parts:
-                    candidates = alpha_parts + [c for c in candidates if c not in alpha_parts]
+                    alpha_upper = [p.upper() for p in alpha_parts]
+                    candidates = alpha_upper + [c for c in candidates if c not in alpha_upper]
 
             # Проверяем специфику размеров
             for c in candidates:
@@ -380,8 +389,8 @@ class ShafaPoster:
 
         logger.info(f"Подбор размерной сетки для: {parsed_size_candidates}")
 
-        # 2. Динамический приоритет вкладок (Шафа ТРЕБУЕТ выбор всех размеров в ОДНОЙ сетке!)
-        tabs_to_check = [
+        # 2. Проверяем, есть ли на странице вкладки переключения сеток (Міжнародний, Європейський, etc.)
+        all_possible_tabs = [
             "За зростом",
             "Український",
             "Міжнародний",
@@ -391,19 +400,60 @@ class ShafaPoster:
             "Виробника"
         ]
 
-        if has_range:
-            # Диапазонные размеры (например: 60-62, 42-44, 48-50, 52-54) есть ТОЛЬКО в Украинской сетке!
-            tabs_to_check = ["Український", "Міжнародний", "Європейський", "За зростом", "За віком", "Виробника"]
-        elif has_kids_height and not has_alpha:
-            tabs_to_check = ["За зростом", "Український", "Міжнародний", "Європейський", "За віком", "Виробника"]
-        elif has_alpha:
-            tabs_to_check = ["Міжнародний", "Український", "Європейський", "За зростом", "Виробника"]
-
-        best_tab = None
-        best_buttons = []
+        # Ищем любые отображаемые кнопки вкладок на форме
+        visible_tab_elements = []
+        for tab_name in all_possible_tabs:
+            try:
+                btns = self.driver.find_elements(By.XPATH, f"//button[contains(., '{tab_name}')]")
+                for b in btns:
+                    if b.is_displayed():
+                        visible_tab_elements.append((tab_name, b))
+                        break
+            except Exception:
+                pass
 
         try:
-            # 3. Ищем вкладку, в которой поместится МАКСИМАЛЬНОЕ количество запрошенных размеров
+            # === СЦЕНАРИЙ А: НА СТРАНИЦЕ НЕТ ВКЛАДОК (Бюстгальтеры / Белье / Ремни / Аксессуары) ===
+            if not visible_tab_elements:
+                logger.info("ℹ️ Вкладки размерных сеток не обнаружены. Поиск в плоской сетке (белье/аксессуары)...")
+                selected_count = 0
+                for candidate_group in parsed_size_candidates:
+                    size_selected = False
+                    for candidate in candidate_group:
+                        try:
+                            xpath = f"//button[.//p[normalize-space(text())='{candidate}'] or normalize-space(text())='{candidate}']"
+                            btns = self.driver.find_elements(By.XPATH, xpath)
+                            for btn in btns:
+                                if btn.is_displayed():
+                                    self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
+                                    time.sleep(0.2)
+                                    self.driver.execute_script("arguments[0].click();", btn)
+                                    logger.info(f"✅ Выбран размер '{candidate}' (прямой выбор без вкладок).")
+                                    size_selected = True
+                                    selected_count += 1
+                                    break
+                        except Exception:
+                            pass
+                        if size_selected:
+                            break
+                if selected_count == 0:
+                    logger.warning(f"⚠️ Не удалось найти размеры {target_sizes} в плоской сетке.")
+                return
+
+            # === СЦЕНАРИЙ Б: НА СТРАНИЦЕ ЕСТЬ ВКЛАДКИ (Взрослая, детская одежда, обувь) ===
+            tabs_to_check = all_possible_tabs
+            if has_range:
+                # Диапазонные размеры (например: 60-62, 42-44, 48-50, 52-54) есть ТОЛЬКО в Украинской сетке!
+                tabs_to_check = ["Український", "Міжнародний", "Європейський", "За зростом", "За віком", "Виробника"]
+            elif has_kids_height and not has_alpha:
+                tabs_to_check = ["За зростом", "Український", "Міжнародний", "Європейський", "За віком", "Виробника"]
+            elif has_alpha:
+                tabs_to_check = ["Міжнародний", "Український", "Європейський", "За зростом", "Виробника"]
+
+            best_tab = None
+            best_buttons = []
+
+            # Ищем вкладку, в которой поместится МАКСИМАЛЬНОЕ количество запрошенных размеров
             for tab_name in tabs_to_check:
                 try:
                     tab_btns = self.driver.find_elements(By.XPATH, f"//button[contains(., '{tab_name}')]")
