@@ -3,6 +3,7 @@ import logging
 import time
 import re
 import os
+import webbrowser
 import tkinter.messagebox as messagebox
 import customtkinter as ctk
 
@@ -13,6 +14,7 @@ from src.utils.image_utils import prepare_images_for_upload
 from src.scraper.parser import ShafaParser
 from src.scraper.profile_scanner import ProfileScanner
 from src.sync.profile_store import ProfileStore
+from src.sync.sold_checker import SoldChecker
 from src.publisher.poster import ShafaPoster
 from src.utils.display_utils import prevent_sleep, allow_sleep
 from src.utils.logger import logger
@@ -35,11 +37,13 @@ class ShafaApp(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("Shafa.ua Автоматизация & Синхронизация Профилей")
-        self.geometry("900x750")
+        self.geometry("950x800")
         
-        # Модули синхронизации
+        # Модули синхронизации и аудита
         self.profile_store = ProfileStore()
         self.profile_scanner = ProfileScanner()
+        self.sold_checker = SoldChecker(self.profile_store, self.profile_scanner)
+        self.audit_results = []
 
         # Настройка главной сетки
         self.grid_columnconfigure(0, weight=1)
@@ -56,10 +60,12 @@ class ShafaApp(ctk.CTk):
         
         self.tab_manual = self.tabview.add("📋 Парсинг по ссылкам")
         self.tab_sync = self.tabview.add("🔄 Синхронизация профилей")
+        self.tab_audit = self.tabview.add("🔍 Аудит проданных")
 
-        # Инициализация интерфейса обеих вкладок
+        # Инициализация интерфейса всех вкладок
         self._setup_manual_tab()
         self._setup_sync_tab()
+        self._setup_audit_tab()
 
         # --- ОБЩИЙ БЛОК ЛОГОВ ---
         self.log_frame = ctk.CTkFrame(self)
@@ -286,8 +292,296 @@ class ShafaApp(ctk.CTk):
         self.sync_status_label.pack(side="left", padx=10, pady=4)
 
     # =========================================================================
-    # ОБРАБОТЧИКИ СОБЫТИЙ СИНХРОНИЗАЦИИ ПРОФИЛЕЙ
+    # ВКЛАДКА 3: АУДИТ ПРОДАННЫХ ТОВАРОВ
     # =========================================================================
+    def _setup_audit_tab(self):
+        tab = self.tab_audit
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_rowconfigure(2, weight=1)
+
+        # 1. Верхняя панель управления аудитом
+        self.audit_control_frame = ctk.CTkFrame(tab)
+        self.audit_control_frame.grid(row=0, column=0, padx=5, pady=5, sticky="ew")
+        self.audit_control_frame.grid_columnconfigure(1, weight=1)
+
+        self.audit_label = ctk.CTkLabel(self.audit_control_frame, text="Профиль донора:", font=("Arial", 12, "bold"))
+        self.audit_label.grid(row=0, column=0, padx=10, pady=8, sticky="w")
+
+        saved_profiles = self.profile_store.get_saved_profiles()
+        combo_values = ["🔍 Проверить ВСЕ сохраненные профили"] + saved_profiles if saved_profiles else ["(Нет сохраненных профилей)"]
+        self.audit_profile_combo = ctk.CTkComboBox(
+            self.audit_control_frame,
+            values=combo_values,
+            width=260
+        )
+        self.audit_profile_combo.set(combo_values[0])
+        self.audit_profile_combo.grid(row=0, column=1, padx=5, pady=8, sticky="w")
+
+        self.audit_start_button = ctk.CTkButton(
+            self.audit_control_frame, text="🔍 Найти проданные товары", command=self.start_sold_audit,
+            fg_color="#e67e22", hover_color="#d35400", text_color="white", font=("Arial", 12, "bold"), width=180
+        )
+        self.audit_start_button.grid(row=0, column=2, padx=8, pady=8)
+
+        self.audit_hidden_var = ctk.BooleanVar(value=True)
+        self.audit_hidden_cb = ctk.CTkCheckBox(
+            self.audit_control_frame, text="Скрытый режим браузера", variable=self.audit_hidden_var
+        )
+        self.audit_hidden_cb.grid(row=0, column=3, padx=10, pady=8, sticky="w")
+
+        # Кнопки действий
+        self.audit_action_frame = ctk.CTkFrame(self.audit_control_frame, fg_color="transparent")
+        self.audit_action_frame.grid(row=1, column=0, columnspan=4, padx=10, pady=(0, 8), sticky="ew")
+
+        self.audit_open_all_btn = ctk.CTkButton(
+            self.audit_action_frame, text="🌐 Открыть все найденные во вкладках", command=self.open_all_audit_items,
+            fg_color="#1f77b4", hover_color="#145a86", text_color="white", state="disabled"
+        )
+        self.audit_open_all_btn.pack(side="left", padx=(0, 10))
+
+        self.audit_copy_btn = ctk.CTkButton(
+            self.audit_action_frame, text="📋 Копировать список ссылок", command=self.copy_audit_links,
+            fg_color="#555555", hover_color="#333333", text_color="white", state="disabled"
+        )
+        self.audit_copy_btn.pack(side="left", padx=5)
+
+        # 2. Информационные карточки статистики и прогресс
+        self.audit_stats_frame = ctk.CTkFrame(tab)
+        self.audit_stats_frame.grid(row=1, column=0, padx=5, pady=5, sticky="ew")
+        self.audit_stats_frame.grid_columnconfigure((0, 1), weight=1)
+
+        self.audit_stat_sold_card = ctk.CTkLabel(
+            self.audit_stats_frame, text="Продано/удалено у донора: 0 шт.",
+            font=("Arial", 12, "bold"), text_color="#d32f2f"
+        )
+        self.audit_stat_sold_card.grid(row=0, column=0, padx=10, pady=6, sticky="w")
+
+        self.audit_stat_active_card = ctk.CTkLabel(
+            self.audit_stats_frame, text="Активно у вас (требуют снятия): 0 шт.",
+            font=("Arial", 12, "bold"), text_color="#e6b800"
+        )
+        self.audit_stat_active_card.grid(row=0, column=1, padx=10, pady=6, sticky="e")
+
+        self.audit_progress_bar = ctk.CTkProgressBar(self.audit_stats_frame)
+        self.audit_progress_bar.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=(2, 4))
+        self.audit_progress_bar.set(0)
+
+        self.audit_status_label = ctk.CTkLabel(
+            self.audit_stats_frame, text="Готов к проверке. Выберите профиль и нажмите 'Найти проданные товары'."
+        )
+        self.audit_status_label.grid(row=2, column=0, columnspan=2, padx=10, pady=(0, 6), sticky="w")
+
+        # 3. Интерактивный список найденных товаров (Scrollable Frame)
+        self.audit_results_scroll = ctk.CTkScrollableFrame(tab, height=270, label_text="Список найденных проданных товаров")
+        self.audit_results_scroll.grid(row=2, column=0, padx=5, pady=5, sticky="nsew")
+        self.audit_results_scroll.grid_columnconfigure(0, weight=1)
+
+        self.audit_placeholder = ctk.CTkLabel(
+            self.audit_results_scroll,
+            text="Здесь появится интерактивный список проданных у донора товаров со ссылками на ваш магазин.",
+            text_color="gray", font=("Arial", 12)
+        )
+        self.audit_placeholder.pack(pady=40)
+
+    # =========================================================================
+    # ОБРАБОТЧИКИ СОБЫТИЙ АУДИТА И СИНХРОНИЗАЦИИ ПРОФИЛЕЙ
+    # =========================================================================
+    def start_sold_audit(self):
+        if self.is_running:
+            messagebox.showwarning("Внимание", "Конвейер или сканирование уже выполняется!")
+            return
+
+        choice = self.audit_profile_combo.get().strip()
+        if not choice or choice == "(Нет сохраненных профилей)":
+            messagebox.showwarning("Ошибка", "Нет сохраненных профилей для проверки. Сначала отсканируйте профиль донора!")
+            return
+
+        self.is_running = True
+        self.audit_start_button.configure(state="disabled")
+        self.audit_open_all_btn.configure(state="disabled")
+        self.audit_copy_btn.configure(state="disabled")
+        self.audit_progress_bar.set(0)
+        self.audit_status_label.configure(text="⏳ Подготовка к аудиту проданных товаров...")
+
+        for widget in self.audit_results_scroll.winfo_children():
+            widget.destroy()
+        loading_lbl = ctk.CTkLabel(
+            self.audit_results_scroll, text="⏳ Выполняется сканирование донора и сверка с вашим кабинетом...",
+            text_color="#1f77b4", font=("Arial", 12)
+        )
+        loading_lbl.pack(pady=30)
+
+        hidden_mode = self.audit_hidden_var.get()
+        threading.Thread(target=self._run_sold_audit_thread, args=(choice, hidden_mode), daemon=True).start()
+
+    def _run_sold_audit_thread(self, choice: str, hidden_mode: bool):
+        poster = None
+        prevent_sleep()
+        try:
+            poster = ShafaPoster(use_secondary_monitor=False, hidden_mode=hidden_mode)
+            if not poster.is_authorized():
+                poster.reveal_window()
+                user_agreed = self.request_login_dialog()
+                if not user_agreed or not poster.is_authorized():
+                    logger.error("Авторизация не подтверждена. Аудит отменен.")
+                    self.after(0, lambda: self.audit_status_label.configure(text="❌ Ошибка: Требуется авторизация в Шафе."))
+                    return
+
+            def on_progress(msg, frac):
+                self.after(0, lambda: self.audit_status_label.configure(text=msg))
+                self.after(0, lambda: self.audit_progress_bar.set(frac))
+
+            results = []
+            if "ВСЕ" in choice:
+                results = self.sold_checker.audit_all_saved_profiles(poster.driver, progress_callback=on_progress)
+            else:
+                username = ProfileScanner.extract_username(choice)
+                results = self.sold_checker.audit_donor_profile(username, poster.driver, progress_callback=on_progress)
+
+            logger.info(f"✨ Аудит завершен: найдено {len(results)} позиций.")
+            self.after(0, lambda r=results: self.render_audit_results(r))
+
+        except Exception as e:
+            logger.error(f"Ошибка аудита проданных товаров: {e}", exc_info=True)
+            self.after(0, lambda err=str(e): self.audit_status_label.configure(text=f"❌ Ошибка: {err}"))
+        finally:
+            if poster:
+                poster.close()
+            allow_sleep()
+            self.is_running = False
+            self.after(0, lambda: self.audit_start_button.configure(state="normal"))
+
+    def render_audit_results(self, results: list[dict]):
+        self.audit_results = results
+        for widget in self.audit_results_scroll.winfo_children():
+            widget.destroy()
+
+        sold_total = len(results)
+        active_mine = sum(1 for r in results if r.get("is_active_on_my_account"))
+
+        self.audit_stat_sold_card.configure(text=f"Продано/удалено у донора: {sold_total} шт.")
+        self.audit_stat_active_card.configure(text=f"Активно у вас (требуют снятия): {active_mine} шт.")
+
+        if not results:
+            self.audit_status_label.configure(text="✅ Отлично! Проданных товаров, которые всё еще висят у вас, не обнаружено.")
+            lbl = ctk.CTkLabel(
+                self.audit_results_scroll,
+                text="🎉 Все товары донора активны на сайте, либо уже сняты с продажи в вашем магазине!",
+                text_color="#2eb82e", font=("Arial", 12, "bold")
+            )
+            lbl.pack(pady=40)
+            return
+
+        self.audit_open_all_btn.configure(state="normal" if active_mine > 0 else "disabled")
+        self.audit_copy_btn.configure(state="normal")
+        self.audit_status_label.configure(text=f"⚠️ Аудит завершен: найдено {active_mine} товаров, требующих снятия с продажи.")
+
+        for idx, item in enumerate(results, 1):
+            card = ctk.CTkFrame(self.audit_results_scroll)
+            card.pack(fill="x", padx=5, pady=4)
+            card.grid_columnconfigure(0, weight=1)
+
+            top_box = ctk.CTkFrame(card, fg_color="transparent")
+            top_box.pack(fill="x", padx=10, pady=(6, 2))
+
+            # Формируем понятный и информативный заголовок вместо технического 'РЕЗЕРВ' или 'Заповнено на 96%'
+            display_title = item.get("my_item_title") or item.get("donor_title") or f"Товар #{item.get('donor_item_id')}"
+            if display_title.strip().lower() in ("резерв", "продано", "бронь", "чернетка", "") or "заповнено" in display_title.lower() or "%" in display_title:
+                raw_slug = re.search(r'/\d+-([a-zA-Z0-9_-]+)', item.get("donor_url", "") or item.get("my_item_url", ""))
+                if raw_slug:
+                    display_title = raw_slug.group(1).replace("-", " ").capitalize()
+                elif item.get("donor_title"):
+                    display_title = item.get("donor_title")
+
+            title_lbl = ctk.CTkLabel(
+                top_box, text=f"{idx}. {display_title}", font=("Arial", 12, "bold"), anchor="w"
+            )
+            title_lbl.pack(side="left", fill="x", expand=True)
+
+            donor_badge = ctk.CTkLabel(
+                top_box, text="🔴 Продан у донора", text_color="#d32f2f", font=("Arial", 11, "bold")
+            )
+            donor_badge.pack(side="right", padx=(5, 0))
+
+            if item.get("is_active_on_my_account"):
+                my_badge = ctk.CTkLabel(
+                    top_box, text="🟢 Активен у вас", text_color="#2eb82e", font=("Arial", 11, "bold")
+                )
+                my_badge.pack(side="right", padx=5)
+            else:
+                my_badge = ctk.CTkLabel(
+                    top_box, text="⚪ Не найден в вашем кабинете (уже снят)", text_color="gray", font=("Arial", 11)
+                )
+                my_badge.pack(side="right", padx=5)
+
+            bottom_box = ctk.CTkFrame(card, fg_color="transparent")
+            bottom_box.pack(fill="x", padx=10, pady=(2, 6))
+
+            # Ссылка на донора (серая вспомогательная кнопка)
+            donor_url = item.get("donor_url")
+            if donor_url:
+                donor_btn = ctk.CTkButton(
+                    bottom_box, text=f"🔗 Донор (#{item.get('donor_item_id')})",
+                    command=lambda u=donor_url: webbrowser.open(u),
+                    fg_color="#333333", hover_color="#444444", text_color="#bbbbbb", height=24, font=("Arial", 10)
+                )
+                donor_btn.pack(side="left", padx=(0, 8))
+
+            # Кнопка открытия СВОЕГО товара (Главная зеленая кнопка)
+            my_url = item.get("my_item_url")
+            if my_url and item.get("is_active_on_my_account"):
+                my_id_label = f"#{item.get('my_item_id')}" if item.get('my_item_id') else ""
+                open_my_btn = ctk.CTkButton(
+                    bottom_box, text=f"🌐 Открыть МОЙ товар ({my_id_label})",
+                    command=lambda u=my_url: webbrowser.open(u),
+                    fg_color="#2eb82e", hover_color="#208020", text_color="white", height=26, font=("Arial", 11, "bold")
+                )
+                open_my_btn.pack(side="right", padx=5)
+            elif my_url:
+                open_my_btn = ctk.CTkButton(
+                    bottom_box, text="🌐 Открыть прошлую ссылку",
+                    command=lambda u=my_url: webbrowser.open(u),
+                    fg_color="#555555", hover_color="#666666", height=24, font=("Arial", 10)
+                )
+                open_my_btn.pack(side="right", padx=5)
+
+    def open_all_audit_items(self):
+        """Открывает все активные найденные товары пользователя во вкладках браузера."""
+        if not self.audit_results:
+            return
+        
+        urls_to_open = [
+            r["my_item_url"] for r in self.audit_results
+            if r.get("my_item_url") and r.get("is_active_on_my_account")
+        ]
+        
+        if not urls_to_open:
+            messagebox.showinfo("Инфо", "Нет активных ссылок на ваши товары для открытия.")
+            return
+
+        logger.info(f"Открытие {len(urls_to_open)} вкладок в браузере...")
+        for url in urls_to_open:
+            webbrowser.open(url)
+            time.sleep(0.2)
+
+    def copy_audit_links(self):
+        """Копирует список ссылок на ваши товары в буфер обмена."""
+        if not self.audit_results:
+            return
+
+        lines = []
+        for r in self.audit_results:
+            if r.get("my_item_url") and r.get("is_active_on_my_account"):
+                lines.append(f"{r.get('donor_title')}: {r.get('my_item_url')}")
+
+        if not lines:
+            messagebox.showinfo("Инфо", "Нет активных ссылок для копирования.")
+            return
+
+        text = "\n".join(lines)
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        messagebox.showinfo("Успех", f"Скопировано {len(lines)} ссылок в буфер обмена!")
     def on_saved_profile_selected(self, choice):
         if choice and choice != "(Нет сохраненных)":
             self.sync_url_entry.delete(0, "end")
@@ -307,6 +601,9 @@ class ShafaApp(ctk.CTk):
         saved = self.profile_store.get_saved_profiles()
         values = saved if saved else ["(Нет сохраненных)"]
         self.sync_saved_combo.configure(values=values)
+
+        audit_values = ["🔍 Проверить ВСЕ сохраненные профили"] + saved if saved else ["(Нет сохраненных профилей)"]
+        self.audit_profile_combo.configure(values=audit_values)
 
     def start_profile_scan(self):
         if self.is_running:
@@ -489,10 +786,23 @@ class ShafaApp(ctk.CTk):
                 try:
                     product_data = parser.parse_item(url, fallback_driver=poster.driver)
                     processed_images = prepare_images_for_upload(product_data.downloaded_images, CROPPED_FOLDER)
-                    poster.publish(product_data, processed_images, deactivate_flag, autopublish_flag)
+                    new_url = poster.publish(product_data, processed_images, deactivate_flag, autopublish_flag)
 
-                    # Атомарная фиксация статуса в базе
-                    self.profile_store.mark_item_status(username, item_id, "published")
+                    # Извлекаем my_item_id из URL вида /217094977-futbolka-polo... или /p/217094977
+                    my_item_id = None
+                    if new_url:
+                        _id_match = re.search(r'/(\d+)-[a-zA-Z0-9_-]+', new_url) or re.search(r'/p/(\d+)', new_url)
+                        if _id_match:
+                            my_item_id = _id_match.group(1)
+
+                    # Атомарная фиксация статуса и связки в базе
+                    self.profile_store.mark_item_status(
+                        username, item_id, "published",
+                        my_item_url=new_url,
+                        my_item_id=my_item_id
+                    )
+                    if my_item_id:
+                        logger.info(f"🔗 Связка зафиксирована: донор #{item_id} → мой товар #{my_item_id} ({new_url})")
                     success += 1
                     processed += 1
                     logger.info(f"✅ Товар #{item_id} успешно перенесен!")
@@ -506,7 +816,7 @@ class ShafaApp(ctk.CTk):
                 self.after(0, lambda u=username: self.update_profile_stats_display(u))
                 self.after(0, lambda p=processed, t=total: self.sync_progress_bar.set(p / t if t > 0 else 0))
 
-            if poster and hidden_flag and not autopublish_flag:
+            if poster and hidden_flag:
                 poster.reveal_window(use_secondary_monitor=use_secondary_flag)
 
             logger.info(f"\n=== МИГРАЦИЯ ПРОФИЛЯ '{username}' ЗАВЕРШЕНА (Успешно: {success}, Ошибок: {failed}) ===")
@@ -519,6 +829,7 @@ class ShafaApp(ctk.CTk):
         finally:
             if parser:
                 parser.close()
+            # Браузер намеренно оставляем открытым для проверки и дебага
             allow_sleep()
             self.is_running = False
             self.after(0, lambda: self.sync_start_button.configure(state="normal"))

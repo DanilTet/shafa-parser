@@ -86,6 +86,9 @@ class ProfileStore:
                     "title": item.get("title", ""),
                     "price": str(item.get("price", "")),
                     "status": "pending",  # pending | published | skipped | failed
+                    "donor_state": "active",  # active | sold_or_deleted
+                    "my_item_url": None,
+                    "my_item_id": None,
                     "discovered_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "published_at": None,
                     "error": None
@@ -98,13 +101,14 @@ class ProfileStore:
                     profile_data[item_id]["title"] = item["title"]
                 if item.get("price"):
                     profile_data[item_id]["price"] = str(item["price"])
+                profile_data[item_id]["donor_state"] = "active"
 
         self.save_profile(username, profile_data)
         logger.info(f"Профиль '{username}': добавлено новых товаров: {new_count}, всего в базе: {len(profile_data)}")
         return new_count, len(profile_data)
 
-    def mark_item_status(self, username_or_url: str, item_id: str, status: str, error: str = None):
-        """Обновляет статус конкретного товара."""
+    def mark_item_status(self, username_or_url: str, item_id: str, status: str, error: str = None, my_item_url: str = None, my_item_id: str = None):
+        """Обновляет статус конкретного товара и опционально привязывает ссылку на опубликованный товар."""
         username = self._clean_username(username_or_url)
         item_id = str(item_id)
         profile_data = self.load_profile(username)
@@ -114,12 +118,67 @@ class ProfileStore:
             if status == "published":
                 profile_data[item_id]["published_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 profile_data[item_id]["error"] = None
+                if my_item_url:
+                    profile_data[item_id]["my_item_url"] = my_item_url
+                if my_item_id:
+                    profile_data[item_id]["my_item_id"] = my_item_id
             elif status == "failed":
                 profile_data[item_id]["error"] = str(error) if error else "Неизвестная ошибка"
             elif status == "skipped":
                 profile_data[item_id]["error"] = str(error) if error else "Пропущено"
 
             self.save_profile(username, profile_data)
+
+    def update_item_mapping(self, username_or_url: str, item_id: str, my_item_url: str, my_item_id: str = None):
+        """Привязывает ссылку и ID товара в личном кабинете к товару донора."""
+        username = self._clean_username(username_or_url)
+        item_id = str(item_id)
+        profile_data = self.load_profile(username)
+
+        if item_id in profile_data:
+            profile_data[item_id]["my_item_url"] = my_item_url
+            if my_item_id:
+                profile_data[item_id]["my_item_id"] = str(my_item_id)
+            self.save_profile(username, profile_data)
+
+    def mark_donor_sold(self, username_or_url: str, item_id: str):
+        """Помечает товар донора как проданный или удаленный."""
+        username = self._clean_username(username_or_url)
+        item_id = str(item_id)
+        profile_data = self.load_profile(username)
+
+        if item_id in profile_data:
+            profile_data[item_id]["donor_state"] = "sold_or_deleted"
+            self.save_profile(username, profile_data)
+
+    def mark_donor_active(self, username_or_url: str, item_id: str):
+        """Помечает товар донора как активный."""
+        username = self._clean_username(username_or_url)
+        item_id = str(item_id)
+        profile_data = self.load_profile(username)
+
+        if item_id in profile_data:
+            profile_data[item_id]["donor_state"] = "active"
+            self.save_profile(username, profile_data)
+
+    def relink_donor_item(self, username_or_url: str, old_id: str, new_item_data: dict):
+        """Перепривязывает товар к новому ID и ссылке донора (при перевыставлении продавцом)."""
+        username = self._clean_username(username_or_url)
+        old_id = str(old_id)
+        new_id = str(new_item_data.get("item_id"))
+        profile_data = self.load_profile(username)
+
+        if old_id in profile_data:
+            entry = profile_data.pop(old_id)
+            entry["item_id"] = new_id
+            entry["url"] = new_item_data.get("url", entry.get("url", ""))
+            new_title = new_item_data.get("title", "")
+            if new_title and new_title.lower() not in ("резерв", "продано", "бронь"):
+                entry["title"] = new_title
+            entry["donor_state"] = "active"
+            profile_data[new_id] = entry
+            self.save_profile(username, profile_data)
+            logger.info(f"🔄 Товар профиля '{username}' перепривязан со старого ID #{old_id} на новый актуальный ID #{new_id} ({entry['url']})")
 
     def get_items_by_status(self, username_or_url: str, status: str = "pending", limit: int = None) -> list[dict]:
         """Возвращает список товаров с указанным статусом."""
@@ -140,7 +199,8 @@ class ProfileStore:
             "pending": 0,
             "published": 0,
             "skipped": 0,
-            "failed": 0
+            "failed": 0,
+            "donor_sold": 0
         }
         for item in profile_data.values():
             s = item.get("status", "pending")
@@ -148,6 +208,9 @@ class ProfileStore:
                 stats[s] += 1
             else:
                 stats["pending"] += 1
+                
+            if item.get("donor_state") == "sold_or_deleted":
+                stats["donor_sold"] += 1
         return stats
 
     def _normalize_title(self, title: str) -> str:
@@ -164,49 +227,57 @@ class ProfileStore:
     def reconcile_listings(self, username_or_url: str, target_listings: list[dict]) -> int:
         """
         Сверяет товары источника с уже опубликованными на целевом аккаунте по слагам URL и названиям.
-        Помечает найденные товары как 'published'.
+        Помечает найденные товары как 'published' и сохраняет ссылку на объявление пользователя.
         """
         username = self._clean_username(username_or_url)
         profile_data = self.load_profile(username)
         if not profile_data or not target_listings:
             return 0
 
-        # Собираем нормализованные слаги и заголовки с целевого аккаунта
-        target_slugs = set()
-        target_titles = set()
+        # Индексируем объявления с целевого аккаунта
+        target_map_by_slug = {}
+        target_map_by_title = {}
+        
         for item in target_listings:
             slug = item.get("slug") or item.get("url", "")
             norm_slug = self._normalize_slug(slug)
             if norm_slug and len(norm_slug) > 3:
-                target_slugs.add(norm_slug)
+                target_map_by_slug[norm_slug] = item
 
             title = item.get("title", "")
             norm_title = self._normalize_title(title)
             if norm_title and len(norm_title) > 3:
-                target_titles.add(norm_title)
+                target_map_by_title[norm_title] = item
 
         matched_count = 0
         for item_id, item in profile_data.items():
-            if item.get("status") == "pending":
-                source_slug = self._normalize_slug(item.get("url", ""))
-                source_title = self._normalize_title(item.get("title", ""))
+            source_slug = self._normalize_slug(item.get("url", ""))
+            source_title = self._normalize_title(item.get("title", ""))
 
-                is_match = False
-                if source_slug and source_slug in target_slugs:
-                    is_match = True
-                elif source_title and source_title in target_titles:
-                    is_match = True
-                elif any(len(s) > 10 and (s in source_slug or source_slug in s) for s in target_slugs):
-                    is_match = True
+            matched_target_item = None
+            if source_slug and source_slug in target_map_by_slug:
+                matched_target_item = target_map_by_slug[source_slug]
+            elif source_title and source_title in target_map_by_title:
+                matched_target_item = target_map_by_title[source_title]
+            else:
+                for target_slug, target_item in target_map_by_slug.items():
+                    if len(target_slug) > 10 and (target_slug in source_slug or source_slug in target_slug):
+                        matched_target_item = target_item
+                        break
 
-                if is_match:
-                    item["status"] = "published"
+            if matched_target_item:
+                is_new_match = item.get("status") != "published" or not item.get("my_item_url")
+                item["status"] = "published"
+                if not item.get("published_at"):
                     item["published_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S") + " (автосверка)"
-                    item["error"] = None
+                item["my_item_url"] = matched_target_item.get("url")
+                item["my_item_id"] = str(matched_target_item.get("item_id", ""))
+                item["error"] = None
+                if is_new_match:
                     matched_count += 1
 
         if matched_count > 0:
             self.save_profile(username, profile_data)
-            logger.info(f"Автосверка для '{username}': автоматически помечено как перенесенные: {matched_count} шт.")
+            logger.info(f"Автосверка для '{username}': сопоставлено и привязано товаров: {matched_count} шт.")
 
         return matched_count

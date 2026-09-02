@@ -1,4 +1,5 @@
 import time
+import re
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -40,7 +41,18 @@ class ShafaPoster:
         else:
             options.add_argument("--start-maximized")
         
-        self.driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+        try:
+            self.driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+        except Exception as e:
+            if "DevToolsActivePort" in str(e) or "crashed" in str(e):
+                logger.warning("⚠️ Обнаружен конфликт или зависший процесс Chrome. Выполняется очистка и повторный запуск...")
+                import subprocess
+                subprocess.run("taskkill /F /IM chrome.exe /IM chromedriver.exe", shell=True, capture_output=True)
+                time.sleep(1.5)
+                self.driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+            else:
+                raise
+
         if hidden_mode:
             try:
                 self.driver.set_window_position(-10000, -10000)
@@ -165,10 +177,12 @@ class ShafaPoster:
             self.deactivate_original(product.original_url)
 
         # Нажатие на кнопку подтверждения публикации
+        new_url = None
         if auto_publish:
-            self.confirm_publish()
+            new_url = self.confirm_publish()
         else:
             logger.info("Автопубликация отключена. Товар готов к ручной проверке.")
+        return new_url
 
     def _safe_input(self, element, text):
         """Универсальный и надежный ввод текста напрямую в React-компонент без использования буфера обмена ОС."""
@@ -327,17 +341,28 @@ class ShafaPoster:
             brand_xpath = "//*[text()='Бренд']/following::input[@role='combobox'][1]"
             brand_input = self.wait.until(EC.visibility_of_element_located((By.XPATH, brand_xpath)))
             self._safe_input(brand_input, product.brand)
+            time.sleep(0.8)
+
             dropdown = self.wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, "div[class*='menu']")))
-            for option in dropdown.find_elements(By.XPATH, ".//div"):
-                if option.text.strip().lower() == product.brand.lower():
-                    option.click()
-                    logger.info(f"Бренд '{product.brand}' успешно выбран.")
-                    break
+            options = dropdown.find_elements(By.XPATH, ".//div")
+            for option in options:
+                try:
+                    text = option.text.strip()
+                    if text.lower() == product.brand.lower():
+                        self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", option)
+                        time.sleep(0.2)
+                        option.click()
+                        logger.info(f"Бренд '{product.brand}' успешно выбран.")
+                        break
+                except Exception:
+                    pass
         except Exception as e:
             logger.error(f"Ошибка при выборе бренда: {e}")
 
     def _fill_size(self, product: Product):
-        target_sizes = product.characteristics.get('розмір:', [])
+        target_sizes = product.characteristics.get('розмір:', []) or product.characteristics.get('розмір', [])
+        if isinstance(target_sizes, str):
+            target_sizes = [target_sizes]
         if not target_sizes:
             return
 
@@ -356,13 +381,17 @@ class ShafaPoster:
                 if s and s not in candidates:
                     candidates.append(s)
 
-            # Убираем 'см' (например: 110 см -> 110)
+            # Обработка 'см' (например: 110см -> 110 см, 110 см -> 110)
             if "см" in raw_clean.lower():
                 without_cm = re.sub(r'(?i)\s*см', '', raw_clean).strip()
                 if without_cm:
-                    for s in [without_cm, without_cm.upper(), without_cm.lower()]:
+                    for s in [without_cm, without_cm.upper(), without_cm.lower(), f"{without_cm} см", f"{without_cm} СМ"]:
                         if s and s not in candidates:
                             candidates.append(s)
+            elif raw_clean.isdigit():
+                for s in [f"{raw_clean} см", f"{raw_clean} СМ"]:
+                    if s and s not in candidates:
+                        candidates.append(s)
 
             # Составной формат со слэшами (L / 40 / 48)
             if "/" in raw_clean:
@@ -656,6 +685,145 @@ class ShafaPoster:
         except Exception as e:
             logger.error(f"Ошибка при заполнении цены: {e}")
 
+    def confirm_publish(self) -> str | None:
+        """
+        Нажимает 'Додати річ', затем проходит всю цепочку публикации Shafa:
+          1. Нажать "Додати річ"
+          2. Нажать "Опублікувати без реклами" (на странице /new/ID/thanks)
+          3. Нажать "Сторінка товару" (извлекаем ID из href до клика)
+          4. Дождаться финального редиректа на страницу товара
+        Возвращает полный URL опубликованного товара или None при ошибке.
+        """
+        from selenium.webdriver.support.ui import WebDriverWait as _WDW
+        try:
+            # --- Шаг 1: Нажимаем "Додати річ" ---
+            logger.info("Подготовка к публикации, стабилизация формы...")
+            time.sleep(1.5)
+            confirm_btn_xpath = "//button[@class='vFhB6y vOHxES aVcdmD' and text()='Додати річ']"
+            confirm_btn = self.wait.until(EC.element_to_be_clickable((By.XPATH, confirm_btn_xpath)))
+            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", confirm_btn)
+            time.sleep(0.5)
+            self.driver.execute_script("arguments[0].click();", confirm_btn)
+            logger.info("✅ Кнопка 'Додати річ' нажата. Ожидание страницы подтверждения...")
+
+            # --- Шаг 2: Нажимаем "Опублікувати без реклами" ---
+            # Важно: ищем именно тег //a (а не //*, который захватывает родительские div/body!)
+            # Также проверяем href на наличие '/thanks'
+            no_ads_xpath = (
+                "//a[contains(@href, '/thanks')] | "
+                "//a[contains(normalize-space(.), 'без реклами') or contains(normalize-space(.), 'без рекламы')] | "
+                "//button[contains(normalize-space(.), 'без реклами') or contains(normalize-space(.), 'без рекламы')]"
+            )
+            no_ads_link = _WDW(self.driver, 20).until(
+                EC.element_to_be_clickable((By.XPATH, no_ads_xpath))
+            )
+
+            # Извлекаем href и ID товара заранее (он уже есть в /new/ID/thanks)
+            thanks_href = no_ads_link.get_attribute("href") or ""
+            import re as _re
+            extracted_id = None
+            if thanks_href:
+                id_match = _re.search(r'/new/(\d+)/thanks', thanks_href)
+                if id_match:
+                    extracted_id = id_match.group(1)
+                    logger.info(f"ID нового товара определён из ссылки: #{extracted_id}")
+
+            # Прокручиваем к ссылке (она находится под карточками тарифов)
+            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", no_ads_link)
+            time.sleep(0.8)
+
+            logger.info("Найдена кнопка 'Опублікувати без реклами'. Нажимаем...")
+            try:
+                no_ads_link.click()
+            except Exception:
+                self.driver.execute_script("arguments[0].click();", no_ads_link)
+
+            # Если после клика страница не сменилась (SPA не сработало), переходим по прямому URL
+            time.sleep(1.5)
+            if "/thanks" not in self.driver.current_url and thanks_href:
+                logger.info(f"Переход на страницу благодарности по прямому адресу: {thanks_href}")
+                self.driver.get(thanks_href)
+
+            # --- Шаг 3: Нажимаем "Сторінка товару" ---
+            product_page_xpath = (
+                "//a[contains(@href, '/p/')] | "
+                "//a[contains(normalize-space(.), 'Сторінка товару') or contains(normalize-space(.), 'Страница товара')]"
+            )
+            try:
+                product_page_link = _WDW(self.driver, 15).until(
+                    EC.element_to_be_clickable((By.XPATH, product_page_xpath))
+                )
+
+                href = product_page_link.get_attribute("href") or ""
+                if not extracted_id and href:
+                    p_match = _re.search(r'/p/(\d+)', href)
+                    if p_match:
+                        extracted_id = p_match.group(1)
+
+                self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", product_page_link)
+                time.sleep(0.5)
+                logger.info("Найдена ссылка 'Сторінка товару'. Переходим...")
+                try:
+                    product_page_link.click()
+                except Exception:
+                    self.driver.execute_script("arguments[0].click();", product_page_link)
+
+            except Exception as e_step3:
+                logger.warning(f"Не удалось нажать 'Сторінка товару' ({e_step3}). Пробуем прямой переход...")
+                # Запасной путь: если ID известен, открываем напрямую /p/ID
+                if extracted_id:
+                    direct_p_url = f"https://shafa.ua/uk/p/{extracted_id}"
+                    logger.info(f"Прямой переход на эндпоинт товара: {direct_p_url}")
+                    self.driver.get(direct_p_url)
+
+            # --- Шаг 4: Ждём перехода, перезагружаем страницу и забираем чистую ссылку ---
+            time.sleep(2)
+            try:
+                def _is_transitioned(d):
+                    u = d.current_url
+                    return ("/p/" in u) or (extracted_id and extracted_id in u) or ("/new" not in u and "/thanks" not in u)
+                _WDW(self.driver, 10).until(_is_transitioned)
+            except Exception:
+                pass
+
+            # Перезагружаем страницу, чтобы устранить баг фронтенда Шафы и зафиксировать финальный URL
+            logger.info("🔄 Перезагрузка страницы товара для устранения бага отображения и фиксации URL...")
+            try:
+                self.driver.refresh()
+                time.sleep(2.5)
+            except Exception as e_ref:
+                logger.warning(f"Не удалось выполнить refresh: {e_ref}")
+
+            def _is_final_product_url(d):
+                url = d.current_url
+                if "/p/" in url or "/new" in url or "/thanks" in url:
+                    return False
+                if extracted_id and extracted_id in url:
+                    return True
+                # Fallback: любой шафа-URL не из /new и не /p/
+                return "shafa.ua" in url and "/new" not in url and "/p/" not in url
+
+            try:
+                _WDW(self.driver, 15).until(_is_final_product_url)
+            except Exception:
+                pass
+
+            final_url = self.driver.current_url
+            logger.info(f"✅ Товар опубликован! URL: {final_url}")
+            return final_url
+
+        except Exception as e:
+            logger.error(f"Ошибка в процессе подтверждения публикации: {e}")
+            # Fallback: берём что есть в current_url если это не форма
+            try:
+                fallback_url = self.driver.current_url
+                if "shafa.ua" in fallback_url and "/new" not in fallback_url:
+                    logger.warning(f"⚠️ Используем fallback URL: {fallback_url}")
+                    return fallback_url
+            except Exception:
+                pass
+            return None
+
     def _fill_keywords(self, product: Product):
         logger.info("Генерация и заполнение ключевых слов...")
         keywords = []
@@ -733,19 +901,6 @@ class ShafaPoster:
                 pass
             self.driver.switch_to.window(current_tab)
 
-    def confirm_publish(self):
-        """Нажатие на кнопку подтверждения публикации."""
-        try:
-            logger.info("Подготовка к публикации и стабилизация формы...")
-            time.sleep(1.5)  # Буфер для полной фиксации всех медиаданных в React state
-            confirm_btn_xpath = "//button[@class='vFhB6y vOHxES aVcdmD' and text()='Додати річ']"
-            confirm_btn = self.wait.until(EC.element_to_be_clickable((By.XPATH, confirm_btn_xpath)))
-            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", confirm_btn)
-            time.sleep(0.5)
-            self.driver.execute_script("arguments[0].click();", confirm_btn)
-            logger.info("Кнопка подтверждения публикации успешно нажата.")
-        except Exception as e:
-            logger.error(f"Не удалось нажать кнопку подтверждения: {e}")
 
     def close(self):
-        self.driver.quit()
+        self.driver.quit()
