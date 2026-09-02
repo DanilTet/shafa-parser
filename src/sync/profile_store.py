@@ -4,6 +4,7 @@ import re
 from datetime import datetime
 from src.config import SYNC_PROFILES_DIR
 from src.utils.logger import logger
+from src.sync.matching_utils import is_relisted_match, normalize_slug, normalize_title
 
 class ProfileStore:
     def __init__(self):
@@ -73,6 +74,16 @@ class ProfileStore:
         username = self._clean_username(username_or_url)
         profile_data = self.load_profile(username)
         new_count = 0
+        relinked_count = 0
+
+        # Собираем ID всех отсканированных товаров
+        scanned_ids = {str(item.get("item_id")) for item in scanned_items if item.get("item_id")}
+
+        # Находим уже перенесенные товары, чей старый донорский ID отсутствует в текущем каталоге
+        disappeared_published = {
+            old_id: entry for old_id, entry in profile_data.items()
+            if entry.get("status") == "published" and old_id not in scanned_ids
+        }
 
         for item in scanned_items:
             item_id = str(item.get("item_id"))
@@ -80,20 +91,48 @@ class ProfileStore:
                 continue
 
             if item_id not in profile_data:
-                profile_data[item_id] = {
-                    "item_id": item_id,
-                    "url": item.get("url", ""),
-                    "title": item.get("title", ""),
-                    "price": str(item.get("price", "")),
-                    "status": "pending",  # pending | published | skipped | failed
-                    "donor_state": "active",  # active | sold_or_deleted
-                    "my_item_url": None,
-                    "my_item_id": None,
-                    "discovered_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "published_at": None,
-                    "error": None
-                }
-                new_count += 1
+                # Проверяем, не является ли этот "новый" товар перевыставленной версией
+                # одного из ранее перенесенных товаров, чей старый ID пропал
+                matched_old_id = None
+                for old_id, old_entry in list(disappeared_published.items()):
+                    is_match, score, reason = is_relisted_match(old_entry, item)
+                    if is_match:
+                        matched_old_id = old_id
+                        break
+
+                if matched_old_id:
+                    # Это перевыставление! Переносим связку на новый ID без создания дубля в очереди
+                    relinked_entry = profile_data.pop(matched_old_id)
+                    relinked_entry["item_id"] = item_id
+                    relinked_entry["url"] = item.get("url", relinked_entry.get("url", ""))
+                    if item.get("title") and item["title"].lower() not in ("резерв", "продано", "бронь"):
+                        relinked_entry["title"] = item["title"]
+                    if item.get("price"):
+                        relinked_entry["price"] = str(item["price"])
+                    relinked_entry["donor_state"] = "active"
+                    profile_data[item_id] = relinked_entry
+                    del disappeared_published[matched_old_id]
+                    relinked_count += 1
+                    logger.info(
+                        f"🔄 При сканировании обнаружено перевыставление: донор обновил #{matched_old_id} ➔ #{item_id}. "
+                        f"Связка сохранена без дублирования ({item.get('url')})"
+                    )
+                else:
+                    # Настоящий новый товар донора
+                    profile_data[item_id] = {
+                        "item_id": item_id,
+                        "url": item.get("url", ""),
+                        "title": item.get("title", ""),
+                        "price": str(item.get("price", "")),
+                        "status": "pending",  # pending | published | skipped | failed
+                        "donor_state": "active",  # active | sold_or_deleted
+                        "my_item_url": None,
+                        "my_item_id": None,
+                        "discovered_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "published_at": None,
+                        "error": None
+                    }
+                    new_count += 1
             else:
                 # Обновляем актуальную ссылку/цену/название, сохраняя существующий статус
                 profile_data[item_id]["url"] = item.get("url", profile_data[item_id]["url"])
@@ -104,7 +143,11 @@ class ProfileStore:
                 profile_data[item_id]["donor_state"] = "active"
 
         self.save_profile(username, profile_data)
-        logger.info(f"Профиль '{username}': добавлено новых товаров: {new_count}, всего в базе: {len(profile_data)}")
+        msg = f"Профиль '{username}': добавлено новых: {new_count}"
+        if relinked_count > 0:
+            msg += f", перепривязано перевыставленных: {relinked_count}"
+        msg += f", всего в базе: {len(profile_data)}"
+        logger.info(msg)
         return new_count, len(profile_data)
 
     def mark_item_status(self, username_or_url: str, item_id: str, status: str, error: str = None, my_item_url: str = None, my_item_id: str = None):
@@ -215,14 +258,11 @@ class ProfileStore:
 
     def _normalize_title(self, title: str) -> str:
         """Нормализует заголовок для сравнения."""
-        cleaned = re.sub(r'[^a-zA-Zа-яА-ЯіІїЇєЄґҐ0-9]', '', str(title).lower())
-        return cleaned
+        return normalize_title(title)
 
     def _normalize_slug(self, url_or_slug: str) -> str:
         """Извлекает и нормализует слаг из URL товара."""
-        m = re.search(r'/\d+-([a-zA-Z0-9_-]+)', str(url_or_slug))
-        slug = m.group(1) if m else str(url_or_slug)
-        return re.sub(r'[^a-z0-9]', '', slug.lower())
+        return normalize_slug(url_or_slug)
 
     def reconcile_listings(self, username_or_url: str, target_listings: list[dict]) -> int:
         """

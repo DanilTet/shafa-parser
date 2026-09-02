@@ -5,108 +5,44 @@ from datetime import datetime
 from src.sync.profile_store import ProfileStore
 from src.scraper.profile_scanner import ProfileScanner
 from src.utils.logger import logger
+from src.sync.matching_utils import (
+    GARMENT_TYPES,
+    STOP_WORDS,
+    detect_garment_type,
+    extract_item_sizes,
+    check_price_proximity,
+    normalize_slug,
+    normalize_title,
+    is_relisted_match
+)
 
-GARMENT_TYPES = {
-    "hudi": {"hudi", "hoodie", "худі", "толстовка"},
-    "svitshot": {"svitshot", "sweatshirt", "світшот"},
-    "sorochka": {"sorochka", "rubashka", "shirt", "сорочка", "рубашка"},
-    "futbolka": {"futbolka", "tshirt", "tee", "футболка"},
-    "polo": {"polo", "поло"},
-    "mayka": {"mayka", "tank", "майка"},
-    "dzhinsi": {"dzhinsi", "jeans", "джинси", "джинсы"},
-    "shtani": {"shtani", "bryuki", "pants", "trousers", "chinos", "штани", "брюки", "чиноси"},
-    "shorti": {"shorti", "shorts", "шорти", "шорты"},
-    "svetr": {"svetr", "sweater", "джемпер", "dzhemper", "пуловер", "pulover", "светр", "свитер", "kofta", "кофта"},
-    "kurtka": {"kurtka", "jacket", "куртка", "вітровка", "vitrovka", "пуховик"},
-    "bluza": {"bluza", "blouse", "блуза", "блузка"},
-    "suknya": {"suknya", "plattia", "dress", "сукня", "плаття", "платье"},
-    "spidnitsya": {"spidnitsya", "skirt", "спідниця", "юбка"},
-    "krosivki": {"krosivki", "sneakers", "кросівки", "кроссовки", "кеди", "kedi"},
-    "tufli": {"tufli", "shoes", "туфлі", "туфли", "черевики", "chereviki", "ботинки"},
-    "remin": {"remin", "belt", "ремінь", "ремень", "пояс", "poyas"}
-}
-
-STOP_WORDS = {
-    # Пол и целевая аудитория
-    "cholovichiy", "cholovicha", "choloviche", "cholovichi", "cholovik", "cholovikam", "choloviki",
-    "zhinochiy", "zhinocha", "zhinoche", "zhinochi", "zhinka", "zhinkam", "zhinki",
-    "uniseks", "unisex", "dityachiy", "dityacha", "dityache",
-    # Размеры, свойства, состояние
-    "rozmir", "size", "stan", "idealniy", "horoshiy", "noviy", "vintage", "vintazh", "original",
-    "dlya", "vid", "bez", "kolir", "tsina", "super", "top", "brend", "brendu", "napis", "napisom",
-    "print", "printom", "komir", "zamok", "gudziki",
-    # Рукава и фасоны (чтобы рубашка не матчилась с худи из-за "довгий рукав")
-    "dovgiy", "korotkiy", "rukav", "rukavom", "dovgim", "korotkim", "rukava",
-    # Материалы
-    "bavovna", "bavovnyaniy", "bavovnyana", "koton", "cotton", "poliester", "viskoza", "viscoza",
-    "elastan", "lyon", "vovna", "akril", "shkira", "zamsha", "pure", "100",
-    # Цвета
-    "chorna", "chorniy", "chorne", "chorni", "bila", "biliy", "bile", "bili",
-    "sira", "siriy", "sire", "siri", "sinya", "siniy", "sinye", "sini",
-    "chervona", "chervoniy", "zelena", "zeleniy", "zhovta", "zhovtiy",
-    "bezheva", "bezheviy", "korichneva", "korichneviy", "rozheva", "rozheviy",
-    "blakitna", "blakitniy", "haki", "kamuflyazh",
-    # Технические строки Шафы
-    "zapovneno", "zapovnena"
-}
-
-def detect_garment_type(text: str) -> str | None:
-    """Определяет категорию одежды по ссылке или названию."""
-    if not text:
-        return None
-    lower = text.lower()
-    for gtype, keywords in GARMENT_TYPES.items():
-        for kw in keywords:
-            if kw in lower:
-                return gtype
-    return None
 
 class SoldChecker:
     def __init__(self, profile_store: ProfileStore = None, profile_scanner: ProfileScanner = None):
         self.profile_store = profile_store or ProfileStore()
         self.profile_scanner = profile_scanner or ProfileScanner()
 
-    def find_relisted_donor_item(self, tracked_item: dict, live_donor_items: list[dict]) -> dict | None:
+    def find_relisted_donor_item(self, tracked_item: dict, live_donor_items: list[dict], claimed_ids: set = None) -> dict | None:
         """
         Проверяет, не перевыставил ли донор этот товар под новым ID/ссылкой.
-        Сравнивает категории, слаги и ключевые слова (с отсечением стоп-слов).
+        Использует многофакторный каскад (категория, размер, цена, слаг, заголовок).
+        Выбирает наилучшего подходящего кандидата и гарантирует 1-к-1 сопоставление.
         """
-        d_url = tracked_item.get("url", "")
-        d_title = tracked_item.get("title", "")
-        d_type = detect_garment_type(d_url + " " + d_title)
-
-        d_slug_raw = re.search(r'/\d+-([a-zA-Z0-9_-]+)', d_url)
-        d_slug_str = d_slug_raw.group(1) if d_slug_raw else d_url
-        d_slug_norm = self.profile_store._normalize_slug(d_slug_str)
-        d_slug_words = set(re.findall(r'[a-zA-Z0-9]{3,}', d_slug_str.lower())) - STOP_WORDS
+        claimed = claimed_ids or set()
+        best_match = None
+        best_score = 0.0
 
         for live_item in live_donor_items:
-            live_url = live_item.get("url", "")
-            live_title = live_item.get("title", "")
-            live_type = detect_garment_type(live_url + " " + live_title)
-
-            # Если категории одежды определены и они разные — пропускаем
-            if d_type and live_type and d_type != live_type:
+            live_id = str(live_item.get("item_id", ""))
+            if not live_id or live_id in claimed:
                 continue
 
-            live_slug_raw = re.search(r'/\d+-([a-zA-Z0-9_-]+)', live_url)
-            live_slug_str = live_slug_raw.group(1) if live_slug_raw else live_url
-            live_slug_norm = self.profile_store._normalize_slug(live_slug_str)
-            
-            # 1. Точное совпадение нормализованного слага
-            if d_slug_norm and live_slug_norm and d_slug_norm == live_slug_norm:
-                return live_item
+            matched, score, reason = is_relisted_match(tracked_item, live_item)
+            if matched and score > best_score:
+                best_score = score
+                best_match = live_item
 
-            # 2. Высокое совпадение характерных ключевых слов (бренд + модель)
-            live_slug_words = set(re.findall(r'[a-zA-Z0-9]{3,}', live_slug_str.lower())) - STOP_WORDS
-            if d_slug_words and live_slug_words:
-                common = d_slug_words & live_slug_words
-                if len(common) >= 2:
-                    score = len(common) / min(len(d_slug_words), len(live_slug_words))
-                    if score >= 0.70:
-                        return live_item
-
-        return None
+        return best_match
 
     def audit_donor_profile(self, donor_username: str, driver, progress_callback=None) -> list[dict]:
         """
@@ -153,16 +89,20 @@ class SoldChecker:
 
         logger.info(f"Донор '{username}': активных товаров на сайте: {len(live_donor_ids)}, в нашей базе перенесено: {len(tracked_items)}")
 
-        # Выявляем пропавшие у донора позиции с автоматической проверкой перевыставлений
+        # Выявляем пропавшие у донора позиции с автоматической проверкой перевыставлений (1-к-1)
         missing_donor_items = []
         relisted_count = 0
+        claimed_relisted_ids = set()
+
         for item in tracked_items:
             item_id = str(item.get("item_id"))
             if item_id not in live_donor_ids:
-                relisted_item = self.find_relisted_donor_item(item, live_donor_items)
+                relisted_item = self.find_relisted_donor_item(item, live_donor_items, claimed_ids=claimed_relisted_ids)
                 if relisted_item:
                     relisted_count += 1
-                    logger.info(f"🔄 Товар #{item_id} перевыставлен донором под новым ID #{relisted_item['item_id']} ({relisted_item['url']}). Товар активен!")
+                    relisted_id = str(relisted_item.get("item_id"))
+                    claimed_relisted_ids.add(relisted_id)
+                    logger.info(f"🔄 Товар #{item_id} перевыставлен донором под новым ID #{relisted_id} ({relisted_item['url']}). Товар активен!")
                     self.profile_store.relink_donor_item(username, item_id, relisted_item)
                 else:
                     missing_donor_items.append(item)
