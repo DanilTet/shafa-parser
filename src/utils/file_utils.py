@@ -6,7 +6,10 @@ from src.models import Product
 def prepare_image_folder(folder_path: str):
     """Удаляет старую папку с картинками и создает чистую."""
     if os.path.exists(folder_path):
-        shutil.rmtree(folder_path)
+        try:
+            shutil.rmtree(folder_path, ignore_errors=True)
+        except Exception:
+            pass
     os.makedirs(folder_path, exist_ok=True)
 
 def save_product_to_txt(product: Product, file_path: str):
