@@ -13,6 +13,11 @@ from src.models import Product
 from src.config import CHROME_PROFILE_PATH
 from src.utils.logger import logger
 from src.utils.display_utils import get_secondary_monitor
+from src.publisher.category_matcher import (
+    detect_gender_profile,
+    score_category_candidate,
+    get_category_synonyms,
+)
 
 class ShafaPoster:
     def __init__(self, use_secondary_monitor: bool = True, hidden_mode: bool = False):
@@ -289,6 +294,24 @@ class ShafaPoster:
         except Exception as e:
             logger.error(f"Ошибка при заполнении базовых полей: {e}")
 
+    def _close_category_modal_if_open(self):
+        """Закрывает всплывающее модальное окно выбора категории, если оно открыто."""
+        try:
+            modals = self.driver.find_elements(
+                By.XPATH,
+                "//p[normalize-space(text())='Виберіть категорію' or normalize-space(text())='Выберите категорию']"
+                " | //div[contains(@class, 'modal') and .//*[contains(text(), 'категор')]]"
+            )
+            for m in modals:
+                if m.is_displayed():
+                    logger.info("Закрытие активного модального окна категорий через Escape...")
+                    body = self.driver.find_element(By.TAG_NAME, "body")
+                    body.send_keys(Keys.ESCAPE)
+                    time.sleep(0.5)
+                    break
+        except Exception:
+            pass
+
     def _fill_category(self, product: Product):
         target_categories = product.characteristics.get('категорії:', [])
         if not target_categories:
@@ -296,35 +319,175 @@ class ShafaPoster:
             return
 
         logger.info(f"Выбор категории из списка: {target_categories}...")
-        time.sleep(2)  # Даем Shafa время подгрузить блок рекомендаций
+        gender = detect_gender_profile(product.title, target_categories)
+        logger.info(f"Определен гендерный профиль товара: '{gender}'")
 
-        for cat_name in target_categories:
+        # -------------------------------------------------------------
+        # ЭТАП 1: Выбор из блока «Рекомендовані категорії» (приоритет)
+        # -------------------------------------------------------------
+        rec_buttons = []
+        rec_xpath = (
+            "//p[contains(text(), 'Рекомендовані') or contains(text(), 'Рекомендованные')]"
+            "/ancestor::div[contains(@class, 'lgtnl3') or .//ul]//button"
+            " | //div[contains(@class, 'lgtnl3')]//button"
+            " | //ul[contains(@class, 'I6ysXv')]//button"
+        )
+
+        # Ожидаем подгрузку блока рекомендаций сервером Shafa (до 4 сек)
+        for _ in range(8):
             try:
-                # Ищем кнопку категории среди рекомендаций и по общему списку
-                xpath_candidates = [
-                    f"//button[.//p[normalize-space(text())='{cat_name}'] or .//span[normalize-space(text())='{cat_name}'] or normalize-space(text())='{cat_name}']",
-                    f"//button[contains(., '{cat_name}')]",
-                ]
-                for xpath in xpath_candidates:
-                    buttons = self.driver.find_elements(By.XPATH, xpath)
-                    for btn in buttons:
-                        if btn.is_displayed():
-                            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
-                            time.sleep(0.3)
-                            self.driver.execute_script("arguments[0].click();", btn)
-                            logger.info(f"✅ Категория '{cat_name}' успешно выбрана!")
-                            time.sleep(1.5)  # Ожидание рендера зависимых разделов (размеры, цвета, свойства)
-                            return
-            except Exception as e:
-                logger.warning(f"Попытка выбора категории '{cat_name}' не удалась: {e}")
+                rec_buttons = self.driver.find_elements(By.XPATH, rec_xpath)
+                rec_buttons = [b for b in rec_buttons if b.is_displayed()]
+                if rec_buttons:
+                    break
+            except Exception:
+                pass
+            time.sleep(0.5)
 
-        logger.warning(f"Категория из списка {target_categories} не найдена автоматически. Оберіть вручну.")
+        if rec_buttons:
+            logger.info(f"Найдено {len(rec_buttons)} рекомендованных категорий от Shafa. Оценка релевантности...")
+            candidates = []
+            for btn in rec_buttons:
+                try:
+                    p_tags = btn.find_elements(By.TAG_NAME, "p")
+                    if p_tags:
+                        btn_title = p_tags[0].text.strip()
+                        btn_path = p_tags[1].text.strip() if len(p_tags) > 1 else ""
+                    else:
+                        lines = [line.strip() for line in btn.text.split("\n") if line.strip()]
+                        btn_title = lines[0] if lines else ""
+                        btn_path = lines[1] if len(lines) > 1 else ""
+
+                    score = score_category_candidate(btn_title, btn_path, target_categories, gender)
+                    candidates.append((score, btn, btn_title, btn_path))
+                    logger.info(f"  Кандидат: '{btn_title}' [{btn_path}] -> Оценка: {score}")
+                except Exception:
+                    continue
+
+            # Сортируем по убыванию оценки
+            candidates.sort(key=lambda x: x[0], reverse=True)
+
+            if candidates and candidates[0][0] > 0:
+                best_score, best_btn, best_title, best_path = candidates[0]
+                logger.info(f"🎯 Выбрана лучшая рекомендация: '{best_title}' ({best_path}) с баллом {best_score}")
+                try:
+                    self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", best_btn)
+                    time.sleep(0.3)
+                    self.driver.execute_script("arguments[0].click();", best_btn)
+                    time.sleep(1.5)
+
+                    # Защита: если вдруг открылась модалка — закрываем через Escape
+                    self._close_category_modal_if_open()
+
+                    logger.info(f"✅ Категория '{best_title}' успешно зафиксирована из рекомендаций!")
+                    return
+                except Exception as e_click:
+                    logger.warning(f"Не удалось кликнуть по рекомендованной категории: {e_click}")
+
+        # -------------------------------------------------------------
+        # ЭТАП 2: Резервный выбор через каталог (Fallback)
+        # -------------------------------------------------------------
+        logger.info("ℹ️ Рекомендации не подошли или отсутствуют. Попытка навигации по общему списку категорий...")
+        try:
+            list_xpath = (
+                "//p[contains(text(), 'Або виберіть') or contains(text(), 'Или выберите')]"
+                "/ancestor::div[contains(@class, 'U_OD58') or .//ul]//button"
+                " | //div[contains(@class, 'U_OD58')]//button"
+                " | //ul[contains(@class, 'Y5sM3M')]//button"
+            )
+            list_buttons = self.driver.find_elements(By.XPATH, list_xpath)
+
+            # Определяем корневую категорию для клика
+            root_cat = target_categories[1] if len(target_categories) > 1 else target_categories[0]
+            root_synonyms = get_category_synonyms(root_cat)
+
+            target_btn = None
+            for b in list_buttons:
+                try:
+                    b_text = b.text.strip().lower()
+                    if any(syn in b_text or b_text in syn for syn in root_synonyms):
+                        target_btn = b
+                        break
+                except Exception:
+                    continue
+
+            if target_btn:
+                logger.info(f"Открытие модального окна категорий через раздел '{root_cat}'...")
+                self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", target_btn)
+                time.sleep(0.3)
+                self.driver.execute_script("arguments[0].click();", target_btn)
+                time.sleep(1.2)
+
+                # Ищем внутри открытого модального окна кнопку конечной категории
+                leaf_cat = target_categories[0]
+                leaf_synonyms = get_category_synonyms(leaf_cat)
+
+                modal_btns = self.driver.find_elements(
+                    By.XPATH,
+                    "//div[contains(@class, 'modal') or .//p[contains(text(), 'Виберіть категорію') or contains(text(), 'Выберите категорию')]]//button"
+                )
+
+                leaf_clicked = False
+                for mb in modal_btns:
+                    try:
+                        mb_text = mb.text.strip().lower()
+                        if any(syn == mb_text for syn in leaf_synonyms):
+                            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", mb)
+                            time.sleep(0.2)
+                            self.driver.execute_script("arguments[0].click();", mb)
+                            logger.info(f"✅ В модальном окне выбрана конечная категория '{leaf_cat}'!")
+                            leaf_clicked = True
+                            time.sleep(1.5)
+                            break
+                    except Exception:
+                        continue
+
+                # Закрываем модалку если она осталась висеть
+                self._close_category_modal_if_open()
+                if leaf_clicked:
+                    return
+
+        except Exception as e_list:
+            logger.warning(f"Ошибка резервного выбора категории через список: {e_list}")
+            self._close_category_modal_if_open()
+
+        logger.warning(f"⚠️ Категория из списка {target_categories} не выбрана автоматически. Оберіть вручну.")
 
     def _fill_condition(self, product: Product):
         if not product.condition:
             return
         logger.info(f"Выбор состояния: {product.condition}...")
+
+        # Синонимы состояний на случай несовпадения локалей (UK <-> RU)
+        condition_synonyms = [product.condition]
+        cond_lower = product.condition.strip().lower()
+        condition_map = {
+            "новий": ["новий", "новый"],
+            "новый": ["новий", "новый"],
+            "ідеальний": ["ідеальний", "идеальный", "идеальное", "ідеальне"],
+            "идеальный": ["ідеальний", "идеальный", "идеальное", "ідеальне"],
+            "дуже хороший": ["дуже хороший", "очень хорошее", "очень хороший", "дуже добре"],
+            "очень хорошее": ["дуже хороший", "очень хорошее", "очень хороший"],
+            "хороший": ["хороший", "хорошее", "добрий"],
+            "хорошее": ["хороший", "хорошее", "добрий"],
+            "задовільний": ["задовільний", "удовлетворительное", "удовлетворительный"],
+            "удовлетворительное": ["задовільний", "удовлетворительное", "удовлетворительный"],
+        }
+        if cond_lower in condition_map:
+            condition_synonyms = condition_map[cond_lower]
+
         try:
+            for cond_candidate in condition_synonyms:
+                xpath = f"//button[normalize-space(text())='{cond_candidate}']"
+                condition_btns = self.driver.find_elements(By.XPATH, xpath)
+                for btn in condition_btns:
+                    if btn.is_displayed():
+                        self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
+                        time.sleep(0.2)
+                        btn.click()
+                        logger.info(f"Состояние '{cond_candidate}' успешно выбрано.")
+                        return
+
             xpath = f"//button[normalize-space(text())='{product.condition}']"
             condition_btn = self.wait.until(EC.visibility_of_element_located((By.XPATH, xpath)))
             self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", condition_btn)
